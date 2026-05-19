@@ -166,8 +166,13 @@ _VALID_TOOL_NAMES = {t["function"]["name"] for t in _TOOLS}
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
 def _format_arena_tree(tree: dict | None) -> str:
+    """Render the sector-level semantic tree returned by /agent/perceive.
+
+    Output clearly labels each level so the LLM knows exactly what type each
+    node is (World / Sector / Arena) and which arena the agent is currently in.
+    """
     if tree is None:
-        return "未知区域"
+        return "（未知区域）"
 
     def _label(node: dict) -> str:
         name = node.get("name", "")
@@ -176,26 +181,33 @@ def _format_arena_tree(tree: dict | None) -> str:
 
     sector_node = tree.get("sector")
     if not sector_node:
-        return _label(tree)
-    arena_node = sector_node.get("arena")
-    if not arena_node:
-        return f"{_label(tree)} > {_label(sector_node)}"
-    objects = arena_node.get("objects", [])
-    path = f"{_label(tree)} > {_label(sector_node)} > {_label(arena_node)}"
-    if objects:
-        obj_list = "、".join(
+        return f"[世界] {_label(tree)}"
+
+    arenas = sector_node.get("arenas", [])
+    lines  = [
+        f"[世界]  {_label(tree)}",
+        f"[区域]  {_label(sector_node)}",
+    ]
+
+    for arena in arenas:
+        current_mark = "  ← 当前位置" if arena.get("current") else ""
+        objects      = arena.get("objects", [])
+        obj_str = "、".join(
             f"{o['name']}（{'可交互' if o['interactable'] else '不可交互'}，ID:{o['id']}）"
             for o in objects
-        )
-        return f"{path}，包含对象：{obj_list}"
-    return path
+        ) if objects else "无对象"
+        lines.append(f"  [场所] {_label(arena)}{current_mark}")
+        lines.append(f"         对象：{obj_str}")
+
+    return "\n".join(lines)
 
 
 def _format_perception(perceive_result: dict) -> str:
-    ps = perceive_result["player_state"]
+    ps  = perceive_result["player_state"]
     pos = ps["position"]
     facing_map = {"up": "上", "down": "下", "left": "左", "right": "右"}
     facing = facing_map.get(ps["facing"], ps["facing"])
+
     front = perceive_result["front_object"]
     front_desc = (
         f"正前方：{front['name']}（ID: {front['id']}）" if front else "正前方：无对象"
@@ -206,13 +218,16 @@ def _format_perception(perceive_result: dict) -> str:
         if diff else "状态无变化"
     )
     state_label = f"，当前使用：{ps['stateLabel']}" if ps.get("stateLabel") else ""
+
+    arena_tree_text = _format_arena_tree(perceive_result["arena_tree"])
+
     return (
         f"位置：({pos['x']}, {pos['y']})，朝向：{facing}\n"
-        f"所在区域：{_format_arena_tree(perceive_result['arena_tree'])}\n"
-        f"视野 tile 数：{len(perceive_result['vision_tiles'])}\n"
+        f"hp: {ps['hp']}，energy: {ps['energy']}，状态: {ps['state']}{state_label}\n"
         f"{front_desc}\n"
         f"{diff_desc}\n"
-        f"hp: {ps['hp']}，energy: {ps['energy']}，状态: {ps['state']}{state_label}"
+        f"视野 tile 数：{len(perceive_result['vision_tiles'])}\n"
+        f"\n【环境结构（世界→区域→场所→对象）】\n{arena_tree_text}"
     )
 
 
