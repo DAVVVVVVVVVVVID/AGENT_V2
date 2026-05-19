@@ -1,0 +1,12 @@
+[project]
+name = "agent-v1"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "openai>=2.37.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "websockets>=12.0",
+]
