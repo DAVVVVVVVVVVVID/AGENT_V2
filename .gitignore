@@ -10,6 +10,12 @@ venv/
 # Logs (runtime output)
 logs/
 
+# Runtime memory data (agent-generated, not source code)
+memory/events/*.md
+memory/recognitions/*.md
+memory/Memory.md
+memory/keywords.md
+
 # IDE
 .idea/
 .vscode/

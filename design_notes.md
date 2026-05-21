@@ -1,150 +1,268 @@
-# AGENT_v1 设计笔记
+# AGENT_v2 设计笔记
 
----
+## 记忆系统设计
 
-## 环境配置
+### 一、文件结构
 
-### Python 环境
-- 使用 **uv** 管理虚拟环境和依赖，与沙盒保持一致
-
-### LLM 配置
-- 模型：**qwen3:32b**（Q4_K_M 量化，20GB）
-- 运行方式：本地 Ollama，Docker 容器 `ollama-gpu`，启动时需加 `--gpus all`
-- API endpoint：`http://localhost:11435`（注意：非默认 11434）
-- 使用 OpenAI 兼容接口：`http://localhost:11435/v1/chat/completions`
-- **Tool Use**：支持，测试通过
-- **思考模式**：Qwen3 默认开启，推理过程在 `reasoning` 字段，实际输出在 `content` / `tool_calls`
-
-### 容器启动命令（备忘）
-```bash
-sudo docker run -d \
-  --name ollama-gpu \
-  --restart unless-stopped \
-  --gpus all \
-  -p 11435:11434 \
-  -v ollama:/root/.ollama \
-  ollama/ollama:0.24.0
+```
+memory/
+├── purpose.md          # 最高层目标（特殊文件，只能通过 Reflection 修改）
+├── Memory.md           # 全量索引，加载到 system prompt
+├── keywords.md         # 关键词表（频次 + 反向文件索引）
+├── events/             # 事件记忆（客观记录）
+│   ├── event_001.md
+│   └── ...
+└── recognitions/       # 认知记忆（主观记录）
+    ├── recog_001.md
+    └── ...
 ```
 
 ---
 
-## 模块一：Perceive
+### 二、记忆文件格式（通用 header）
 
-### 已确认内容
+每个记忆文件（event / recognition）均以如下 frontmatter 开头：
 
-**1. 所在 arena 完整树状信息（语义层）**
-- 只提供语义信息：当前 arena 内有哪些 world / sector / arena / object，叫什么名字，是否可交互
-- **不包含坐标等具体位置信息**
-- LLM 根据需要自行判断，再调用对应 API 获取特定坐标信息
+```markdown
+---
+Description: <一句话摘要>
+Time: <ISO 8601，记忆创建时刻>
+Keywords: [kw1, kw2, kw3]
+Type: event | recognition
+Importance: <0–10，LLM 在创建时评分>
+---
 
-**2. 视野范围内 tile 信息（感知层）**
-- 以 agent 为中心，视野边长（vision_size）默认为 3，即 3×3 范围
-- 每个 tile 提供：坐标、所属 world / sector / arena、object（有则告知）
-- 视野内属于其他 arena 的 tile：只提供 tile 信息，不展开其 arena 树状结构
-- 定位：arena 树状信息是语义层（知道"这里有什么"），视野 tile 是感知层（知道"周围具体长什么样"），两者互补
+<正文内容>
+```
 
-**3. 自身状态变化（diff）**
-- agent 维护上一次状态快照
-- 每次 Perceive 时与当前状态做 diff，只输出发生变化的字段
-- 监控的易变字段：`position`、`facing`、`state`、`stateLabel`、`hp`、`energy`、`buffs`、`tags`、`usingObjectId`
-
-**4. 正前方格子信息**
-- Perceive 额外输出正前方一格的内容
-- Think 只关心：是否是 object，如果是，是什么 object
-
-**5. 其他约定**
-- 视野边长（vision_size）：agent 独立定义，默认值 3（3×3），偶数自动取奇；不依赖沙盒 player 字段
-- 所有信息均通过沙盒标准 API 获取（见 `../SANDBOX/docs/api-spec.md`）
-- 自身固定信息（姓名、性格、性别等）不在 Perceive 中出现，由 Think 模块打包提供
+**Importance 评分（0–10）：** 由生成该记忆的 LLM 在创建时一次性打分，基准如下：
+- 0–3：日常琐事，低重复价值
+- 4–6：有参考价值的经历
+- 7–9：重要事件或关键认知
+- 10：极少数，改变目标/世界观的事件
 
 ---
 
-## 模块二：Think
+### 三、Memory.md（全量索引）
 
-### 输入信息
+格式：每条记忆一行，包含文件路径、Description、Time、Importance。
 
-**1. Agent 个人参数**
-- **性格特征**：使用 OCEAN 模型打分存储，根据分数动态生成描述性语言；生成逻辑单独封装为可复用的方法/文件
-- **生活方式**：描述性句子列表，如 `["早上习惯于早起", "饭后喜欢喝牛奶"]`，直接描述输入
-- 纯系统计算参数（如视野半径）不提供给 Think
+```
+- [event_001](events/event_001.md) — <Description> | 2026-05-01T10:00 | imp=8
+- [recog_001](recognitions/recog_001.md) — <Description> | 2026-05-01T11:00 | imp=6
+```
 
-**2. 当前任务目标**
-- 由用户在 agent 启动时提供，全程携带直到 agent 完成任务
-
-**3. 历史记忆（滚动窗口）**
-- 存储内容：每轮的 Thought + Action + Observation
-- 保留最近 10 轮，超出后自动丢弃最旧的记录
-
-**4. 当前完整状态**
-- 完整的当前玩家状态（非 diff，完整快照）
-- Perceive 产出的环境感知：arena 语义树 + 视野 tile + 正前方 object 信息
-
-### 输出：原子化行为（从以下选项中选一个）
-
-**信息获取类**
-
-| 行为 | 说明 |
-|------|------|
-| 获取某一 arena 的坐标范围 | 返回该 arena 包含的所有坐标 |
-| 获取某一 object 的具体坐标 | 返回该 object 的位置 |
-
-**沙盒交互类**
-
-| 行为 | 说明 | API 状态 |
-|------|------|----------|
-| 位移到某一具体坐标 | 对应鼠标点击位移 | 已有 |
-| 向某方向位移 N 格 | payload: `{"direction": "up", "steps": N}`，逐格执行，遇到不可行走格子停止 | 需修改 API |
-| 转至某方向 | 不位移，只改变朝向 | 已有 |
-| 使用物品 | 面向物品按 E | 已有 |
-| 观察物品 | 面向物品按 I，获取描述 | 已有 |
-| 离开物品 | 当前使用中，按 Q 离开 | 已有 |
-| 位移到 world/sector/arena 随机位置 | 沙盒返回目标区域随机可行走坐标，内部用点击位移 API 执行移动 | 需新增 API |
-
-### 待同步到 api-spec.md 的 API 变更
-
-1. **修改**：`move` action 支持 `steps` 参数，`{"direction": "up", "steps": 3}`，逐格校验，遇阻停止
-2. **新增**：移动到目标 world/sector/arena 随机可行走位置的 action type
+**作用：** 在每次 Retrieve 阶段之前，Memory.md 完整加载进 system prompt，让检索 agent 知道所有记忆的摘要，从而做 KW 选择。
 
 ---
 
-## 模块三：Execute
+### 四、keywords.md（关键词反向索引）
 
-### 输入
-- Think 输出的结构化 tool call，格式如 `{"tool": "move_to", "args": {"x": 3, "y": 4}}`
+格式：每行一个关键词，含出现频次与关联文件列表。
 
-### Tool Use 设计
-- Think 调用 LLM 时，将所有可用行为定义为 tool（Function Calling / Tool Use 格式）
-- LLM 直接输出结构化 tool call，无需额外的"描述性文字→API"翻译步骤
-- Execute 接收 tool call，映射到对应的沙盒 HTTP 请求
+```
+睡觉: 3, [events/event_001.md, events/event_005.md, recognitions/recog_002.md]
+厨房: 2, [events/event_002.md, recognitions/recog_001.md]
+疲劳: 1, [recognitions/recog_003.md]
+```
 
-### 参数变更
-- 目前所有可变状态均属于沙盒 player，Execute 调用 API 后由沙盒负责更新
-- 暂无 agent 独有的可变参数，此问题暂不处理
-
-### 执行结果 → Observation
-- 沙盒 API 返回结构化结果（`success`、`reason`、`result`）
-- Execute 将结果转换为自然语言 Observation，存入历史记忆
-- 每个 action type 对应固定模板生成 Observation，格式统一
-- 示例：
-  - 失败：`"尝试移动到 (1,1)，失败：目标格子不可行走"`
-  - 成功：`"成功移动到 (3,4)，当前朝向：上"`
+**作用：** Retrieve 阶段第二步，检索 agent 根据选出的关键词，从这里找到关联文件。
 
 ---
 
-## 模块四：循环机制
+### 五、记忆类型详解
 
-### 循环触发
-- Execute 完成后（无论成功或失败），Observation 生成完毕即触发下一次 Perceive → Think → Execute 循环
-- 超时机制（Execute 长时间未结束时强制进入下一循环）暂不实现，后续再添加
+#### 5.1 Event 记忆（事件记忆）
 
-### 循环结束
-- Think 的可选行为中加入特殊的 `finish` action
-- LLM 在 Think 阶段判断任务已完成时选择 `finish`，并在 action 参数中直接生成对原始任务目标的总结回复
-- 循环主控检测到 `finish` 时停止循环，输出该总结回复
-- 结束后不再单独跑 LLM，总结由 `finish` action 内直接产出
+- **定义：** 客观发生的事，记录 what/how/why
+- **生成者：** 影子 Agent（Shadow Agent），异步、后台运行
+- **触发时机：** 主 agent 调用 `finish()` 时，当前 Plan 完成
+- **内容三层结构：**
+  1. **What（发生了什么）：** Plan 的目标是什么，实际完成了什么
+  2. **How（怎么做到的）：** 关键步骤、用了哪些 tool、遇到什么障碍
+  3. **Why（为什么这样做）：** 背后的 Purpose / 上下文原因
 
-### finish action 补充到 Think 模块行为列表
+#### 5.2 Recognition 记忆（认知记忆）
 
-| 行为 | 说明 | API 状态 |
-|------|------|----------|
-| finish | 判断任务完成，附带总结回复文字，终止循环 | 无需调用沙盒 API |
+- **定义：** 主观感受、价值判断、情感状态、对事物的看法
+- **生成者：** 主 agent 自身，通过 tool call 触发
+- **触发时机：** agent 在 Think 阶段判断需要记录某种认知时主动调用
+- **举例：** "我发现厨房的冰箱总是空的，这让我感到不安" / "今天的任务完成得很顺利，我对自己的效率感到满意"
+
+---
+
+### 六、检索机制（两步检索）
+
+Retrieve 阶段在 Perceive 之后、Think 之前，由一个独立的小型 LLM agent 执行。
+
+#### 第一步：KW 选择
+
+- 输入：当前 task / 当前感知摘要 + **完整 Memory.md 索引**
+- 输出：3–5 个关键词（从 keywords.md 已有词中选，或新词）
+- 模型：轻量模型即可（如 qwen3:8b）
+
+#### 第二步：文件命中 + Importance 排序
+
+- 根据第一步选出的 KW，在 keywords.md 中查找反向索引，合并关联文件列表（去重）
+- 对每个候选文件计算**检索时 Importance 分**：
+
+```
+retrieval_score = base_importance
+                + time_decay_bonus
+                + kw_match_score
+
+time_decay_bonus = max(0, 3 - days_elapsed / 7)   # 最近 3 周内有加分
+kw_match_score   = matched_kw_count * 0.5          # 每命中一个 KW 加 0.5 分
+```
+
+- 取 top 5 文件，加载正文内容，注入 Think 阶段 prompt
+
+---
+
+### 七、purpose.md（最高层目标）
+
+- **特殊文件：** 不走普通记忆流程，独立存在
+- **内容：** agent 的最高层、长期目标（如"在小镇中建立日常生活规律"）
+- **修改限制：** 只能通过 **Reflection 机制**（未来实现）修改，主 agent 无法直接改写
+- **加载方式：** 每次循环开始时读入，作为 Plan 生成的最高约束
+
+---
+
+### 八、Purpose → Plan → Action 三层循环（自驱动）
+
+替代 AGENT_v1 的手动任务输入，agent 自主产生任务：
+
+```
+Purpose（最高层目标，长期稳定）
+  └─ Plan Batch（一批 Plan，有序列表，一次性生成）
+       └─ Plan（中期目标，逐个执行，全部完成后才重新生成下一批）
+            └─ Action Sequence（原子行动序列，Think 每次输出多步）
+```
+
+#### 8.1 整体两层循环结构
+
+```
+【外层循环 — 规划者】
+  Perceive → Retrieve → Plan Batch 生成（有序列表）
+      ↓
+  【内层循环 — 执行者，逐个 Plan】
+    Perceive → Retrieve → Think（Action Sequence）→ Execute → finish()
+    取下一个 Plan，重复内层循环
+      ↓
+  内层全部完成 → 回到外层循环，重新 Perceive → Retrieve → 生成新一批 Plan
+```
+
+#### 8.2 外层循环（规划者）
+
+- **Perceive：** 与内层相同，调用同一个 `/agent/perceive` 接口
+- **Retrieve：** 与内层相同机制——Memory.md 在 system prompt，KW 检索 top 5 记忆作为 attachment
+- **Plan Batch 生成：**
+  - 输入：Purpose（`purpose.md`）+ 当前感知 + 检索记忆
+  - 输出：有序的 Plan 列表（LLM 决定执行顺序）
+  - 使用**规划者 prompt**（角色定位为长期规划，思考粒度粗，关注目标分解）
+- **触发时机：** 启动时 / 当前批次全部 `finish()` 后
+
+#### 8.3 内层循环（执行者）
+
+- 从 Plan Batch 中按序取当前 Plan 作为任务目标
+- 使用**执行者 prompt**（角色定位为逐步执行，思考粒度细，关注具体行动）
+- 每次 `finish()` 后触发影子 Agent 生成 Event 记忆，然后取下一个 Plan
+- Perceive / Retrieve 机制与外层相同
+
+#### 8.4 LLM 与 Prompt 说明
+
+| | 外层（规划者） | 内层（执行者） |
+|---|---|---|
+| LLM 模型 | 相同模型 | 相同模型 |
+| Prompt 角色 | 长期规划者，负责目标分解 | 具体执行者，负责步骤决策 |
+| 输出格式 | 有序 Plan 列表 | Action Sequence（tool calls）|
+| Retrieve 机制 | 相同 | 相同 |
+
+---
+
+### 九、Action Sequence 细节
+
+#### 9.1 输出格式
+
+Think 利用 OpenAI API 原生支持的 **multiple tool_calls**，在单次响应中返回多个 tool call，构成本轮的行动序列。
+
+#### 9.2 执行与结果记录
+
+Execute 按序逐个执行 tool_calls：
+- **成功：** 记录执行结果（如位移后的新坐标、阅读到的对象描述）
+- **失败：** 记录失败原因，立即停止，后续未执行的行动标记为"未执行"
+
+无论成功与否，**完整序列快照**都提交给下一轮循环作为 observation，格式示例：
+
+```
+行动1: move_direction(up, 3)  → 成功，移动到 (3, 2)
+行动2: turn(right)            → 成功，朝向 right
+行动3: use_object()           → 失败，no_object_in_front
+行动4: observe_object()       → 未执行
+```
+
+#### 9.3 下一轮循环入口
+
+执行序列结束后（全部成功或中途失败），无论结果如何，都重新走 **Perceive → Retrieve → Think** 循环，携带上述完整序列快照作为历史 observation。
+
+---
+
+### 十、影子 Agent（Shadow Agent）
+
+- 主 agent 调用 `finish()` 后异步触发
+- 读取当前 Plan 完整历史（history），生成 Event 记忆文件
+- 写入 events/ 目录，更新 Memory.md 和 keywords.md
+- 主 agent 不等待影子 agent，继续生成下一个 Plan
+
+---
+
+### 十、暂时搁置的机制
+
+- **Reflection（反思）：** 唯一能修改 `purpose.md` 的机制，未来实现
+  - 触发条件：累计若干次 Plan 完成后，或 Importance 极高事件出现
+  - 流程：独立 LLM 对近期记忆做高阶归纳，判断是否需要调整 Purpose
+
+---
+
+### 十一、代码结构
+
+```
+agent/
+├── memory/             # 记忆系统（独立子包）
+│   ├── __init__.py
+│   ├── store.py        # Event/Recognition 文件读写、Memory.md、keywords.md 维护
+│   └── shadow.py       # 影子 Agent（异步，finish() 后触发）
+│
+├── loop.py             # 外层（规划者）+ 内层（执行者）两个循环
+├── perceive.py         # 感知，与 v1 基本不变
+├── retrieve.py         # 两步 KW 检索 agent
+├── plan.py             # 规划者 LLM 调用，输出有序 Plan Batch
+├── think.py            # 执行者 LLM 调用，输出 Action Sequence（multiple tool_calls）
+├── execute.py          # 按序执行 Action Sequence，记录每步结果
+│
+├── personality.py      # 不变
+├── logger.py           # 更新以支持 v2 日志格式
+└── ui_server.py        # 更新以支持自驱动模式
+```
+
+**模块职责说明：**
+- `memory/store.py`：所有记忆文件的 CRUD，包括 Memory.md 索引和 keywords.md 反向索引的维护
+- `memory/shadow.py`：异步影子 Agent，`finish()` 后触发，读取历史生成 Event 记忆
+- `retrieve.py`：独立小型 LLM agent，外层/内层循环共用，执行两步 KW 检索
+- `plan.py`：规划者角色，输出有序 Plan 列表，prompt 与 think.py 完全不同
+- `think.py`：执行者角色，输出 multiple tool_calls（Action Sequence）
+- `execute.py`：按序执行，遇失败立即停止，返回完整序列快照（含成功结果/失败原因/未执行标记）
+- `loop.py`：外层规划循环 + 内层执行循环，两层放一起以清晰体现嵌套关系
+
+---
+
+### 十二、与 AGENT_v1 的主要差异
+
+| 维度 | AGENT_v1 | AGENT_v2 |
+|------|----------|----------|
+| 任务来源 | 用户手动输入 | 自驱动（Purpose→Plan） |
+| 循环结构 | Perceive→Think→Execute | Perceive→Retrieve→Think→Execute |
+| Think 输出 | 单个 tool call | 原子行动序列 |
+| 记忆系统 | 无 | Event + Recognition + Purpose |
+| 检索机制 | 无 | 两步 KW 检索 + Importance 排序 |
+| 影子 Agent | 无 | 有（异步生成 Event 记忆） |

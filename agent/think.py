@@ -1,5 +1,5 @@
 """
-Think module — builds prompt and calls LLM to produce a structured tool call.
+Think module — executor LLM, outputs an Action Sequence (multiple tool_calls).
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ import json
 
 from openai import OpenAI
 
+from agent.memory import store
 from agent.personality import ocean_to_description
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -146,13 +147,13 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "任务已完成时调用，终止循环并输出总结。",
+            "description": "当前 Plan 已完成时调用，必须是序列中最后一个行动。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "reply": {
                         "type": "string",
-                        "description": "对原始任务目标的总结回复",
+                        "description": "对当前 Plan 目标的总结回复",
                     },
                 },
                 "required": ["reply"],
@@ -166,11 +167,6 @@ _VALID_TOOL_NAMES = {t["function"]["name"] for t in _TOOLS}
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
 def _format_arena_tree(tree: dict | None) -> str:
-    """Render the sector-level semantic tree returned by /agent/perceive.
-
-    Output clearly labels each level so the LLM knows exactly what type each
-    node is (World / Sector / Arena) and which arena the agent is currently in.
-    """
     if tree is None:
         return "（未知区域）"
 
@@ -188,7 +184,6 @@ def _format_arena_tree(tree: dict | None) -> str:
         f"[世界]  {_label(tree)}",
         f"[区域]  {_label(sector_node)}",
     ]
-
     for arena in arenas:
         current_mark = "  ← 当前位置" if arena.get("current") else ""
         objects      = arena.get("objects", [])
@@ -198,7 +193,6 @@ def _format_arena_tree(tree: dict | None) -> str:
         ) if objects else "无对象"
         lines.append(f"  [场所] {_label(arena)}{current_mark}")
         lines.append(f"         对象：{obj_str}")
-
     return "\n".join(lines)
 
 
@@ -206,20 +200,18 @@ def _format_perception(perceive_result: dict) -> str:
     ps  = perceive_result["player_state"]
     pos = ps["position"]
     facing_map = {"up": "上", "down": "下", "left": "左", "right": "右"}
-    facing = facing_map.get(ps["facing"], ps["facing"])
+    facing     = facing_map.get(ps["facing"], ps["facing"])
 
-    front = perceive_result["front_object"]
+    front      = perceive_result["front_object"]
     front_desc = (
         f"正前方：{front['name']}（ID: {front['id']}）" if front else "正前方：无对象"
     )
-    diff = perceive_result["state_diff"]
+    diff      = perceive_result["state_diff"]
     diff_desc = (
         "状态变化：" + "、".join(f"{k}={v}" for k, v in diff.items())
         if diff else "状态无变化"
     )
     state_label = f"，当前使用：{ps['stateLabel']}" if ps.get("stateLabel") else ""
-
-    arena_tree_text = _format_arena_tree(perceive_result["arena_tree"])
 
     return (
         f"位置：({pos['x']}, {pos['y']})，朝向：{facing}\n"
@@ -227,8 +219,24 @@ def _format_perception(perceive_result: dict) -> str:
         f"{front_desc}\n"
         f"{diff_desc}\n"
         f"视野 tile 数：{len(perceive_result['vision_tiles'])}\n"
-        f"\n【环境结构（世界→区域→场所→对象）】\n{arena_tree_text}"
+        f"\n【环境结构（世界→区域→场所→对象）】\n{_format_arena_tree(perceive_result['arena_tree'])}"
     )
+
+
+def _format_action_sequence(seq: list[dict]) -> str:
+    lines = []
+    for a in seq:
+        status = a.get("status", "")
+        name   = a.get("name", "")
+        args   = a.get("arguments", {})
+        if status == "success":
+            detail = str(a.get("result", ""))
+            lines.append(f"    ✓ {name}({args}) → {detail}")
+        elif status == "failed":
+            lines.append(f"    ✗ {name}({args}) → 失败：{a.get('reason', '')}")
+        else:
+            lines.append(f"    … {name}({args}) → 未执行")
+    return "\n".join(lines)
 
 
 def _build_system_prompt(
@@ -237,41 +245,53 @@ def _build_system_prompt(
     lifestyle: list[str],
     common_sense: list[str],
 ) -> str:
-    personality = ocean_to_description(
-        ocean["O"], ocean["C"], ocean["E"], ocean["A"], ocean["N"]
-    )
+    personality       = ocean_to_description(ocean["O"], ocean["C"], ocean["E"], ocean["A"], ocean["N"])
     lifestyle_text    = "\n".join(f"- {item}" for item in lifestyle)
     common_sense_text = "\n".join(f"- {item}" for item in common_sense)
+    memory_index      = store.load_memory_index()
+    memory_section    = (
+        f"\n【记忆索引】\n{memory_index}" if "- [" in memory_index else ""
+    )
     return (
         f"你是{name}，一个生活在虚拟世界中的角色。\n\n"
         f"【性格特征】\n{personality}\n\n"
         f"【生活方式】\n{lifestyle_text}\n\n"
-        f"【常识】\n{common_sense_text}\n\n"
-        "根据当前感知和历史记忆，选择下一步行动。\n"
-        "每次只能选择一个行动，必须通过 tool call 输出，不要输出纯文字回复。"
+        f"【常识】\n{common_sense_text}\n"
+        f"{memory_section}\n\n"
+        "根据当前 Plan、感知信息和历史记忆，规划并输出本轮的行动序列。\n"
+        "可以一次输出多个原子行动（tool call），按执行顺序排列。\n"
+        "若当前 Plan 已完成，最后一个行动必须是 finish()。\n"
+        "所有行动均通过 tool call 输出，不要输出纯文字回复。"
     )
 
 
 def _build_user_message(
-    task: str,
+    plan: str,
     history: list[dict],
     perceive_result: dict,
+    retrieved_memories: list[str],
 ) -> str:
-    parts = [f"【当前任务】\n{task}"]
+    parts = [f"【当前 Plan】\n{plan}"]
+
     if history:
-        lines = ["【历史记忆】"]
+        lines = ["【历史轮次】"]
         for i, h in enumerate(history, 1):
             lines.append(f"第{i}轮：")
-            lines.append(f"  思考：{h['thought']}")
-            lines.append(f"  行动：{h['action']}")
-            lines.append(f"  观察：{h['observation']}")
+            lines.append(f"  思考：{h.get('thought', '')}")
+            if "action_sequence" in h:
+                lines.append("  行动序列：")
+                lines.append(_format_action_sequence(h["action_sequence"]))
         parts.append("\n".join(lines))
+
+    if retrieved_memories:
+        mem_text = "\n\n---\n\n".join(retrieved_memories)
+        parts.append(f"【检索到的相关记忆】\n{mem_text}")
+
     parts.append(f"【当前感知】\n{_format_perception(perceive_result)}")
     return "\n\n".join(parts)
 
 
 def _extract_thought(msg) -> str:
-    """Extract reasoning/thinking text from the LLM response message."""
     for attr in ("reasoning", "reasoning_content"):
         val = getattr(msg, attr, None)
         if val:
@@ -296,31 +316,41 @@ class Think:
         model: str = "qwen3:32b",
         agent_logger=None,
     ):
-        self._system = _build_system_prompt(name, ocean, lifestyle, common_sense or [])
-        self._llm = OpenAI(base_url=llm_base_url, api_key="ollama")
-        self._model = model
-        self._logger = agent_logger
+        self._name      = name
+        self._ocean     = ocean
+        self._lifestyle = lifestyle
+        self._common_sense = common_sense or []
+        self._llm       = OpenAI(base_url=llm_base_url, api_key="ollama")
+        self._model     = model
+        self._logger    = agent_logger
 
     def think(
         self,
-        task: str,
+        plan: str,
         history: list[dict],
         perceive_result: dict,
+        retrieved_memories: list[str] | None = None,
     ) -> dict:
         """
         Call LLM and return:
-          {"thought": str, "tool_call": {"name": str, "arguments": dict}}
+          {
+            "thought": str,
+            "action_sequence": [{"name": str, "arguments": dict}, ...]
+          }
+        Memory.md is reloaded each call so the index is always current.
         """
-        user_msg = _build_user_message(task, history, perceive_result)
+        system  = _build_system_prompt(self._name, self._ocean, self._lifestyle, self._common_sense)
+        user_msg = _build_user_message(plan, history, perceive_result, retrieved_memories or [])
         messages = [
-            {"role": "system", "content": self._system},
+            {"role": "system", "content": system},
             {"role": "user",   "content": user_msg},
         ]
+
         if self._logger:
-            self._logger.log_prompt(self._system, user_msg)
+            self._logger.log_prompt(system, user_msg)
 
         msg = None
-        for attempt in range(3):
+        for _ in range(3):
             resp = self._llm.chat.completions.create(
                 model=self._model,
                 messages=messages,
@@ -331,23 +361,26 @@ class Think:
             if msg.tool_calls:
                 break
         else:
-            raise RuntimeError(f"LLM returned no tool call after 3 attempts. content={msg.content!r}")
+            raise RuntimeError(
+                f"LLM returned no tool call after 3 attempts. content={msg.content!r}"
+            )
 
-        thought   = _extract_thought(msg)
-        tc        = msg.tool_calls[0]
-        name      = tc.function.name
-        arguments = json.loads(tc.function.arguments)
+        thought = _extract_thought(msg)
 
-        if name not in _VALID_TOOL_NAMES:
-            raise RuntimeError(f"LLM returned unknown tool: {name!r}")
+        action_sequence = []
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            if name not in _VALID_TOOL_NAMES:
+                raise RuntimeError(f"LLM returned unknown tool: {name!r}")
+            action_sequence.append({
+                "name":      name,
+                "arguments": json.loads(tc.function.arguments),
+            })
 
         if self._logger:
-            self._logger.log_llm_result(thought, name, arguments)
+            self._logger.log_llm_result(thought, str(action_sequence), {})
 
         return {
-            "thought":   thought,
-            "tool_call": {
-                "name":      name,
-                "arguments": arguments,
-            },
+            "thought":         thought,
+            "action_sequence": action_sequence,
         }

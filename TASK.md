@@ -1,255 +1,178 @@
-# AGENT_v1 任务清单
+# AGENT_v2 任务列表
 
-> 执行顺序：TASK001 → TASK011，存在依赖关系，不可乱序。
-> 每个 TASK 完成后更新状态：`[ ]` → `[x]`
-
----
-
-## TASK001 · 项目初始化
-
-**状态**：`[x]`
-
-**目标**：建立 AGENT_v1 的 uv 项目结构和目录。
-
-**内容**：
-- 初始化 uv 项目（`pyproject.toml`），Python 版本 ≥ 3.11
-- 添加依赖：`openai`（LLM 调用）、`httpx`（沙盒 API 调用）
-- 创建目录结构：
-  ```
-  AGENT_v1/
-  ├── agent/
-  │   ├── __init__.py
-  │   ├── main.py           # 入口
-  │   ├── loop.py           # 循环主控
-  │   ├── perceive.py       # Perceive 模块
-  │   ├── think.py          # Think 模块
-  │   ├── execute.py        # Execute 模块
-  │   ├── personality.py    # OCEAN 描述生成
-  │   ├── sandbox_client.py # 沙盒 API 客户端
-  │   └── config.py         # Agent 配置（profile、视野半径等）
-  ```
-
-**验收标准**：
-- `uv sync` 无报错
-- `uv run python -c "import agent"` 无报错
+设计文档：`design_notes.md`
+沙盒 API：`../SANDBOX/docs/api-spec.md`
 
 ---
 
-## TASK002 · OCEAN 性格描述生成模块
+## TASK001 — 项目结构重组
 
-**状态**：`[x]`
+**内容：**
+- 按照设计文档第十一节重组 `agent/` 目录：
+  - 新建 `agent/memory/__init__.py`、`agent/memory/store.py`、`agent/memory/shadow.py`
+  - 新建 `agent/retrieve.py`、`agent/plan.py`
+  - 保留并更新 `agent/perceive.py`、`agent/think.py`、`agent/execute.py`、`agent/loop.py`、`agent/logger.py`、`agent/personality.py`、`agent/ui_server.py`
+  - 新建 `memory/` 数据目录（运行时存储）：`memory/events/`、`memory/recognitions/`，并创建空的 `memory/Memory.md`、`memory/keywords.md`、`memory/purpose.md`
+- 更新 `pyproject.toml` 中依赖（如有新增）
 
-**目标**：将 OCEAN 五维评分转换为自然语言描述。
-
-**内容**：
-- 文件：`agent/personality.py`
-- 输入：5 个维度各 0–100 的浮点分数 `{O, C, E, A, N}`
-- 输出：一段描述性文字，根据分数高低动态生成（不同区间对应不同描述词）
-- 函数签名：`def ocean_to_description(o, c, e, a, n) -> str`
-
-**验收标准**：
-- 调用 `ocean_to_description(80, 40, 60, 70, 30)` 返回一段合理的中文描述
-- 分别将某一维度调高/调低，输出中对应描述词发生变化
-
----
-
-## TASK003 · 沙盒 API 客户端
-
-**状态**：`[x]`
-
-**目标**：封装所有现有沙盒 HTTP 接口，供各模块调用。
-
-**内容**：
-- 文件：`agent/sandbox_client.py`
-- 封装以下接口（base_url 可配置，默认 `http://localhost:8000`）：
-  - `get_world() -> dict`
-  - `get_player() -> dict`
-  - `get_events() -> list`
-  - `get_history() -> list`
-  - `post_action(entity_id, action_type, payload) -> dict`
-
-**验收标准**：
-- 沙盒后端运行时，调用每个方法均能返回正确数据
-- `post_action("player_01", "move", {"direction": "up"})` 返回包含 `success` 字段的响应
+**验收标准：**
+- `uv run python -c "from agent import memory"` 不报错
+- `memory/` 数据目录及初始文件存在
+- `memory/purpose.md` 有占位内容（如"在小镇中建立日常生活规律"）
 
 ---
 
-## TASK004 · 沙盒改造：多步移动 API
+## TASK002 — memory/store.py — 记忆文件读写
 
-**状态**：`[x]`
+**内容：**
+- `create_event(history, importance, keywords, summary)` → 生成 `memory/events/event_NNN.md`，写入标准 frontmatter + 三层正文（What/How/Why）
+- `create_recognition(content, importance, keywords, summary)` → 生成 `memory/recognitions/recog_NNN.md`
+- `update_memory_index(filepath, description, time, importance)` → 追加一行到 `memory/Memory.md`
+- `update_keywords(keywords, filepath)` → 更新 `memory/keywords.md`，维护计数和反向文件列表
+- `read_purpose()` → 返回 `memory/purpose.md` 全文
+- `load_memory_index()` → 返回 `memory/Memory.md` 全文
+- `load_files(filepaths)` → 读取并返回指定记忆文件正文列表
 
-**目标**：新增 `move_n` action type，支持一次向某方向移动 N 格，不修改现有 `move`。
-
-**内容**：
-- 修改文件：`SANDBOX/back_end/routers/actions.py`，新增 `handle_move_n` handler 并注册
-- payload：`{"direction": "up"|"down"|"left"|"right", "steps": N}`
-- 逐格执行，每格独立校验 walkable，遇阻立即停止并返回实际到达位置和实际步数
-- 同步更新 `SANDBOX/docs/api-spec.md`
-
-**验收标准**：
-- `POST /action {"type": "move_n", "payload": {"direction": "up", "steps": 3}}` 成功时 player 向上移动最多 3 格
-- 若中途有不可行走格，停在最后一个可行走格，`result` 中包含 `steps_taken` 和最终 `position`
-- 原有 `move` action 行为完全不变
-
----
-
-## TASK005 · 沙盒改造：Perceive 专用端点
-
-**状态**：`[x]`
-
-**目标**：新增 `GET /agent/perceive` 接口，一次返回 agent 感知所需的全部信息。
-
-**内容**：
-- 新增文件：`SANDBOX/back_end/routers/agent.py`
-- 新增路由：`GET /agent/perceive?entity_id=player_01&vision_radius=3`
-- 返回内容：
-  1. **arena 语义树**：当前 arena 内的 world / sector / arena 名称 + object 列表（名称、是否可交互）；无坐标
-  2. **视野 tile 列表**：以当前位置为中心，radius 范围内每个 tile 的坐标、类型、所属 arena、object（若有）
-  3. **正前方格子**：正前方一格是否有 object，若有则返回 object id 和名称
-- 同步更新 `SANDBOX/docs/api-spec.md`
-
-**验收标准**：
-- 沙盒运行时调用接口，返回包含上述三部分的 JSON
-- arena 语义树中无任何坐标字段
-- 视野列表格数 ≤ (2×radius+1)²（边界 tile 超出地图则不返回）
-- 正前方有 object 时返回 object 信息，无 object 时返回 null
+**验收标准：**
+- 调用 `create_event` 后，对应文件存在，frontmatter 格式正确
+- 调用 `update_keywords` 两次后，`keywords.md` 计数正确，反向索引含两个文件
+- `Memory.md` 每次追加不覆盖原有内容
 
 ---
 
-## TASK006 · 沙盒改造：区域导航 & 坐标查询
+## TASK003 — memory/shadow.py — 影子 Agent
 
-**状态**：`[x]`
+**内容：**
+- `trigger_shadow_agent(history, llm, model)` — 异步函数，主 agent 调用 `finish()` 后触发
+- 流程：调用 LLM 根据 history 生成 Event 记忆的三层内容（What/How/Why）、摘要、关键词、Importance 评分
+- 调用 `store.create_event`、`store.update_memory_index`、`store.update_keywords` 写入结果
+- 主 agent 不等待（`asyncio.create_task` 或线程）
 
-**目标**：新增 agent Think 阶段所需的两类信息查询接口，以及区域随机导航 action。
-
-**内容**：
-
-查询接口（新增到 `SANDBOX/back_end/routers/agent.py`）：
-- `GET /agent/arena-tiles?arena_id=xxx` → 返回该 arena 所有 tile 坐标列表
-- `GET /agent/object-position?object_id=xxx` → 返回该 object 的坐标
-
-新增 action type（修改 `SANDBOX/back_end/routers/actions.py`）：
-- type: `move_to_area`
-- payload: `{"area_type": "arena"|"sector"|"world", "area_id": "xxx"}`
-- 行为：在目标区域内随机选取一个可行走坐标，调用 targetTile 移动逻辑移动过去
-- 同步更新 `SANDBOX/docs/api-spec.md`
-
-**验收标准**：
-- `GET /agent/arena-tiles?arena_id=xxx` 返回坐标列表，所有坐标确实属于该 arena
-- `GET /agent/object-position?object_id=xxx` 返回正确坐标
-- `POST /action {"type": "move_to_area", "payload": {"area_type": "arena", "area_id": "xxx"}}` 执行后 player 出现在目标 arena 内某可行走位置
+**验收标准：**
+- 传入 mock history（3轮），触发后 `memory/events/` 中出现新文件
+- 主循环不阻塞（触发后立即返回，记忆文件异步写入）
+- 生成的文件 frontmatter 字段完整（Description、Time、Keywords、Type、Importance）
 
 ---
 
-## TASK007 · Perceive 模块
+## TASK004 — perceive.py — 感知模块
 
-**状态**：`[x]`
+**内容：**
+- 从 v1 迁移，接口不变
+- 调用 `GET /agent/perceive`，返回 `arena_tree`、`vision_tiles`、`front_object`、`player_state`、`state_diff`
 
-**目标**：实现 agent 的感知模块，输出结构化感知结果。
+**验收标准：**
+- 沙盒运行时，`perceive()` 返回结构与 v1 一致
+- 沙盒未运行时，抛出明确异常而非静默失败
 
-**内容**：
-- 文件：`agent/perceive.py`
-- 调用 `GET /agent/perceive` 获取环境信息
-- 调用 `GET /player` 获取完整玩家状态
-- 与上一次状态快照做 diff，输出变化字段（监控字段：`position`、`facing`、`state`、`stateLabel`、`hp`、`energy`、`buffs`、`tags`、`usingObjectId`）
-- 返回结构：
+---
+
+## TASK005 — retrieve.py — 两步 KW 检索
+
+**内容：**
+- `retrieve(task_or_plan, perceive_summary, llm, model)` → 返回 top 5 记忆文件正文列表
+- **第一步**：小型 LLM 根据 task/感知摘要 + Memory.md 索引，选出 3–5 个关键词
+- **第二步**：在 `keywords.md` 中查找关键词反向索引，合并候选文件列表，按 retrieval_score 排序，取 top 5
+  - `retrieval_score = base_importance + time_decay_bonus + kw_match_score`
+  - `time_decay_bonus = max(0, 3 - days_elapsed / 7)`
+  - `kw_match_score = matched_kw_count * 0.5`
+- 无记忆时返回空列表
+
+**验收标准：**
+- mock Memory.md（5条记忆）+ keywords.md，调用后返回正确排序的 top 5
+- 空 Memory.md 时返回 `[]` 不报错
+- LLM 选出的关键词不在 keywords.md 中时，安全跳过（不崩溃）
+
+---
+
+## TASK006 — think.py — 执行者 LLM
+
+**内容：**
+- 从 v1 迁移并重构
+- `Think.think(plan, history, perceive_result, retrieved_memories)` → 返回 Action Sequence
+- 利用 OpenAI API **multiple tool_calls**，单次响应返回多个 tool call
+- 执行者 prompt（角色：逐步执行，关注具体行动）
+- retrieved_memories 作为 attachment 注入 user message
+- Memory.md 索引注入 system prompt
+
+**验收标准：**
+- LLM 返回至少 1 个 tool call（含 finish）
+- 返回格式：`[{"name": str, "arguments": dict}, ...]`
+- retrieved_memories 为空时正常运行
+
+---
+
+## TASK007 — plan.py — 规划者 LLM
+
+**内容：**
+- `Plan.generate(purpose, perceive_result, retrieved_memories, llm, model)` → 返回有序 Plan 列表
+- 规划者 prompt（角色：长期规划，关注目标分解，思考粒度粗）
+- 输出格式：JSON 列表，每个 Plan 为一个字符串描述
+- 同样注入 Memory.md + retrieved_memories
+
+**验收标准：**
+- 传入 purpose + 感知结果，返回非空有序列表（≥1 个 Plan）
+- 输出可解析为 Python list of str
+- Plan 内容与 purpose 语义相关（人工判断）
+
+---
+
+## TASK008 — execute.py — Action Sequence 执行
+
+**内容：**
+- 从 v1 迁移并重构
+- `execute_sequence(action_sequence, sandbox_client)` → 返回完整序列快照
+- 按序执行每个 action，调用沙盒 API
+- 成功：记录结果（新坐标、阅读内容等）
+- 失败：记录失败原因，立即停止，后续标记"未执行"
+- 返回格式：
   ```python
-  {
-    "arena_tree":    {...},  # 语义树
-    "vision_tiles":  [...],  # 视野 tile
-    "front_object":  {...},  # 正前方 object 或 null
-    "player_state":  {...},  # 完整玩家状态
-    "state_diff":    {...},  # 变化的字段
-  }
+  [
+      {"name": "move_direction", "arguments": {...}, "status": "success", "result": {...}},
+      {"name": "use_object",     "arguments": {},    "status": "failed",  "reason": "no_object_in_front"},
+      {"name": "observe_object", "arguments": {},    "status": "pending"},
+  ]
   ```
 
-**验收标准**：
-- 首次调用：`state_diff` 包含所有监控字段（无上次快照，视为全部变化）
-- 连续两次调用且玩家未移动：`state_diff` 为空
-- player 移动后调用：`state_diff` 中出现 `position` 字段
+**验收标准：**
+- 第 2 个 action 失败时，第 3 个状态为 `"pending"`
+- 全部成功时，所有状态为 `"success"`
+- finish() 在序列中时，正确识别并终止内层循环
 
 ---
 
-## TASK008 · Think 模块
+## TASK009 — loop.py — 双层循环
 
-**状态**：`[x]`
+**内容：**
+- **外层循环** `run_outer(config)`：
+  - 读取 purpose → Perceive → Retrieve → Plan.generate → 得到 Plan Batch（有序列表）
+  - 进入内层循环逐个执行 Plan
+  - Plan Batch 全部完成后重新外层循环
+- **内层循环** `run_inner(plan, ...)`：
+  - Perceive → Retrieve → Think → execute_sequence
+  - 序列中出现 finish()：触发 shadow agent，结束本 Plan
+  - 传给下一轮的 history 包含完整序列快照
+- pause/resume 支持（继承 v1 机制）
 
-**目标**：实现 agent 的思考模块，调用 LLM 输出结构化 tool call。
-
-**内容**：
-- 文件：`agent/think.py`
-- 构建 prompt，包含：
-  - agent 性格描述（调用 `ocean_to_description`）
-  - agent 生活方式列表
-  - 当前任务目标
-  - 历史记忆（最近 10 轮 Thought + Action + Observation）
-  - Perceive 输出（arena 树 + 视野 + 正前方 object + 完整玩家状态）
-- 将所有可用行为定义为 tools（含 finish），tool 列表：
-  `get_arena_tiles`, `get_object_position`, `move_to_tile`, `move_direction`, `turn`, `use_object`, `observe_object`, `leave_object`, `move_to_area`, `finish`
-- 调用 LLM（endpoint: `http://localhost:11435/v1`，model: `qwen3:32b`）
-- 返回：`{"thought": "...", "tool_call": {"name": "...", "arguments": {...}}}`
-
-**验收标准**：
-- 给定简单感知输入，Think 返回合法 tool call（name 在可用列表内，arguments 结构正确）
-- `thought` 字段非空
-- 给定"任务已完成"的场景描述，LLM 选择 `finish` tool
+**验收标准：**
+- 沙盒运行时，agent 自动生成 Plan Batch 并逐个执行，不需要手动输入任务
+- finish() 后，shadow agent 异步写入 Event 记忆
+- Plan Batch 耗尽后，自动触发下一次外层循环（重新规划）
+- pause 后循环停止在当前轮结束处，resume 后继续
 
 ---
 
-## TASK009 · Execute 模块
+## TASK010 — ui_server.py — 自驱动 UI
 
-**状态**：`[x]`
+**内容：**
+- 移除手动任务输入框（改为自动运行）
+- 新增启动/停止按钮（控制整个双层循环）
+- 显示当前状态：外层循环（规划中）/ 内层循环（执行 Plan X/N）
+- 保留 v1 的 pause/resume、chat panel、logging 开关
+- 实时展示当前 Plan Batch 列表及各 Plan 完成状态
 
-**目标**：将 Think 输出的 tool call 转为沙盒 API 调用，并生成 Observation。
-
-**内容**：
-- 文件：`agent/execute.py`
-- 接收 tool call，映射到对应的沙盒 API 调用（通过 `sandbox_client`）
-- 每个 tool 对应固定 Observation 模板（成功/失败均有对应中文描述）
-- `finish` tool 不调用沙盒，直接返回总结
-- 返回：`{"observation": "...", "is_finish": bool, "finish_reply": "..."}`
-
-**验收标准**：
-- `move_to_tile` 成功：observation 包含目标坐标和最终位置
-- `move_to_tile` 失败（不可行走）：observation 包含失败原因
-- `finish` tool：`is_finish=True`，`finish_reply` 为 LLM 生成的总结文字
-
----
-
-## TASK010 · 循环主控 & 入口
-
-**状态**：`[x]`
-
-**目标**：实现完整的 ReAct 循环及用户启动入口。
-
-**内容**：
-- 文件：`agent/loop.py`（循环主控）、`agent/main.py`（入口）
-- 循环逻辑：Perceive → Think → Execute → 存历史 → 检测 finish → 继续或退出
-- 历史滚动窗口：最多保留 10 轮，超出自动丢弃最旧一条
-- 入口参数：
-  - `--task`：任务目标字符串
-  - `--entity_id`：默认 `player_01`
-  - agent profile 从 `config.py` 读取
-
-**验收标准**：
-- `uv run python -m agent.main --task "去沙发上休息"` 能启动循环
-- 每轮终端打印：轮次、Thought、Action、Observation
-- finish 后正常退出并打印最终总结
-- 历史超过 10 轮后，最旧条目自动丢弃
-
----
-
-## TASK011 · 端到端集成测试
-
-**状态**：`[x]`
-
-**前提**：沙盒后端已启动，Ollama GPU 容器运行中（端口 11435）。
-
-**测试场景**：
-1. 给定简单任务（如"找到沙发并使用它"），agent 能在若干轮内完成并触发 finish
-2. 给定无法完成的任务，观察 agent 是否在多轮后选择 finish 并说明原因
-
-**验收标准**：
-- 场景 1：agent 实际移动到沙发位置，调用 use_object，最终输出完成总结
-- 每轮日志清晰展示 Thought / Action / Observation
-- 无未捕获异常，沙盒状态与 agent 行为一致
+**验收标准：**
+- 点击启动后，agent 自动开始运行，UI 实时更新状态
+- Plan Batch 列表可见，当前执行的 Plan 有高亮标记
+- pause/resume/chat 功能与 v1 一致
+- 点击停止后，循环在当前轮结束时退出

@@ -4,6 +4,8 @@ Perceive module — fetches environment + player state, computes state diff.
 
 from __future__ import annotations
 
+import httpx
+
 from agent.sandbox_client import SandboxClient
 
 _MONITORED = (
@@ -19,8 +21,13 @@ class Perceive:
         self._last_snapshot: dict | None = None
 
     def perceive(self) -> dict:
-        env    = self._client.get_perceive(vision_size=self._vision_size)
-        player = self._client.get_player()
+        try:
+            env    = self._client.get_perceive(vision_size=self._vision_size)
+            player = self._client.get_player()
+        except httpx.ConnectError as e:
+            raise RuntimeError(
+                f"无法连接沙盒（{self._client._base}），请确认沙盒已启动。原因：{e}"
+            ) from e
 
         snapshot = {k: player.get(k) for k in _MONITORED}
         diff     = self._compute_diff(snapshot)
