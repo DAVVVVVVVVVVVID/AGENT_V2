@@ -166,13 +166,14 @@ class Execute:
             return _ok({
                 "objectId":   r.get("objectId"),
                 "stateLabel": r.get("stateLabel") or r.get("playerState"),
+                "message":    r.get("message"),
             })
         reason = res.get("reason", "")
+        r = res.get("result") or {}
         if reason == "object_full":
-            r = res.get("result") or {}
-            msg = f"对象已满（{r.get('currentUsers')}/{r.get('maxUsers')}）"
+            msg = r.get("message") or f"对象已满（{r.get('currentUsers')}/{r.get('maxUsers')}）"
         else:
-            msg = {
+            msg = r.get("message") or {
                 "no_object_in_front": "正前方没有可使用的对象",
                 "not_interactable":   "该对象不可交互",
                 "use_disabled":       "当前无法使用对象",
