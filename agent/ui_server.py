@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -32,10 +33,24 @@ from agent.retrieve import Retrieve
 from agent.sandbox_client import SandboxClient
 from agent.think import Think
 
-app = FastAPI()
-
 _cfg    = AGENT_CONFIG
 _client = SandboxClient()
+_player_id: str = ""
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _player_id
+    pid, _ = _client.join_player(_cfg["name"])
+    _player_id = pid
+    yield
+    try:
+        _client.leave_player(_player_id)
+    except Exception:
+        pass
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # ── loop state ────────────────────────────────────────────────────────────────
 _loop_thread: threading.Thread | None = None
@@ -68,7 +83,7 @@ def _run_loop_thread() -> None:
 
     llm = OpenAI(base_url=cfg["llm_base_url"], api_key="ollama")
 
-    perceiver = Perceive(_client, vision_size=cfg["vision_size"])
+    perceiver = Perceive(_client, entity_id=_player_id, vision_size=cfg["vision_size"])
     retriever = Retrieve(llm, model=cfg["model"])
     planner   = Planner(name=cfg["name"], llm=llm, model=cfg["model"],
                         agent_logger=logger)
@@ -79,7 +94,7 @@ def _run_loop_thread() -> None:
         llm_base_url=cfg["llm_base_url"], model=cfg["model"],
         agent_logger=logger,
     )
-    executor  = Execute(_client, entity_id=cfg["entity_id"])
+    executor  = Execute(_client, entity_id=_player_id)
 
     def emit(msg: dict) -> None:
         if _stop_flag.is_set():
@@ -121,7 +136,7 @@ def agent_config() -> dict:
     cfg = _cfg
     return {
         "name":         cfg["name"],
-        "entity_id":    cfg["entity_id"],
+        "entity_id":    _player_id,
         "ocean":        cfg["ocean"],
         "ocean_desc":   ocean_to_description(
             cfg["ocean"]["O"], cfg["ocean"]["C"], cfg["ocean"]["E"],
@@ -138,7 +153,7 @@ def agent_config() -> dict:
 @app.get("/player-status")
 def player_status() -> dict:
     try:
-        return _client.get_player()
+        return _client.get_player(_player_id)
     except Exception as e:
         return {"error": str(e)}
 
@@ -146,7 +161,7 @@ def player_status() -> dict:
 @app.get("/player-buffs")
 def player_buffs() -> dict:
     try:
-        return _client._get("/admin/player/buffs")
+        return _client._get(f"/admin/player/{_player_id}/buffs")
     except Exception as e:
         return {"error": str(e)}
 
@@ -154,7 +169,7 @@ def player_buffs() -> dict:
 @app.post("/player-force-reset")
 def player_force_reset() -> dict:
     try:
-        return _client._post("/admin/player/force-reset", {"entity_id": _cfg["entity_id"]})
+        return _client._post("/admin/player/force-reset", {"entity_id": _player_id})
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

@@ -15,15 +15,16 @@ _MONITORED = (
 
 
 class Perceive:
-    def __init__(self, client: SandboxClient, vision_size: int = 3):
+    def __init__(self, client: SandboxClient, entity_id: str, vision_size: int = 3):
         self._client = client
+        self._entity_id = entity_id
         self._vision_size = vision_size
         self._last_snapshot: dict | None = None
 
     def perceive(self) -> dict:
         try:
-            env    = self._client.get_perceive(vision_size=self._vision_size)
-            player = self._client.get_player()
+            env    = self._client.get_perceive(entity_id=self._entity_id, vision_size=self._vision_size)
+            player = self._client.get_player(self._entity_id)
         except httpx.ConnectError as e:
             raise RuntimeError(
                 f"无法连接沙盒（{self._client._base}），请确认沙盒已启动。原因：{e}"

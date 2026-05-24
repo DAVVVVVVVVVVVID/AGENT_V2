@@ -25,15 +25,31 @@ class SandboxClient:
         r.raise_for_status()
         return r.json()
 
+    def _delete(self, path: str) -> None:
+        url = f"{self._base}{path}"
+        r = httpx.delete(url, timeout=self._timeout)
+        r.raise_for_status()
+
+    # ── player lifecycle ───────────────────────────────────────────────────
+
+    def join_player(self, name: str) -> tuple[str, dict]:
+        """POST /player/join — creates a player, returns (player_id, player)."""
+        data = self._post("/player/join", {"name": name})
+        return data["playerId"], data["player"]
+
+    def leave_player(self, player_id: str) -> None:
+        """DELETE /player/{player_id}/leave — removes the player."""
+        self._delete(f"/player/{player_id}/leave")
+
     # ── query endpoints ────────────────────────────────────────────────────
 
     def get_world(self) -> dict:
-        """GET /world — returns tiles, objects, worldState."""
+        """GET /world — returns tiles, objects, worldState, players."""
         return self._get("/world")
 
-    def get_player(self) -> dict:
-        """GET /player — triggers buff tick and returns full player state."""
-        return self._get("/player")
+    def get_player(self, player_id: str) -> dict:
+        """GET /player/{player_id} — returns full player state."""
+        return self._get(f"/player/{player_id}")
 
     def get_events(self) -> list:
         """GET /events — returns world event list."""
