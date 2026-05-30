@@ -26,7 +26,7 @@ from agent.logger import AgentLogger
 from agent.loop import run as run_loop
 from agent.memory import store
 from agent.memory.store import (
-    clear_events, clear_recognitions, clear_auxiliary, reset_purpose,
+    clear_events, clear_recognitions, clear_consolidated, clear_auxiliary, reset_purpose,
 )
 from agent.perceive import Perceive
 from agent.personality import ocean_to_description
@@ -359,18 +359,20 @@ def chat_message(body: dict) -> dict:
 def memory_clear(body: dict) -> dict:
     """
     清除指定类型的记忆。
-    body: {"types": ["events", "recognitions", "auxiliary", "purpose"]}
-    "all" 为快捷值，等同于全部四项。
+    body: {"types": ["events", "recognitions", "consolidated", "auxiliary", "purpose"]}
+    "all" 为快捷值，等同于全部五项。
     """
     types = body.get("types", [])
     if "all" in types:
-        types = ["events", "recognitions", "auxiliary", "purpose"]
+        types = ["events", "recognitions", "consolidated", "auxiliary", "purpose"]
 
     summary = {}
     if "events" in types:
         summary["events"] = clear_events()
     if "recognitions" in types:
         summary["recognitions"] = clear_recognitions()
+    if "consolidated" in types:
+        summary["consolidated"] = clear_consolidated()
     if "auxiliary" in types:
         clear_auxiliary()
         summary["auxiliary"] = "已重置"
@@ -414,9 +416,14 @@ def set_purpose(body: dict) -> dict:
 
 @app.get("/memory/files")
 def memory_files(type: str = "events") -> dict:
-    """返回 events 或 recognitions 的文件列表，含 frontmatter 元数据。"""
+    """返回 events / recognitions / consolidated 的文件列表，含 frontmatter 元数据。"""
     import re
-    directory = store.get_events_dir() if type == "events" else store.get_recognitions_dir()
+    if type == "events":
+        directory = store.get_events_dir()
+    elif type == "consolidated":
+        directory = store.get_consolidated_dir()
+    else:
+        directory = store.get_recognitions_dir()
     files = []
     for f in sorted(directory.glob("*.md")):
         text = f.read_text(encoding="utf-8")
@@ -775,6 +782,11 @@ _HTML = r"""<!DOCTYPE html>
         <input type="checkbox" class="chk-item" value="recognitions">
         <span class="check-label">Recognition 记忆</span>
         <span class="check-desc">recognitions/*.md</span>
+      </label>
+      <label class="modal-check-row">
+        <input type="checkbox" class="chk-item" value="consolidated">
+        <span class="check-label">Consolidated 记忆</span>
+        <span class="check-desc">consolidated/*.md</span>
       </label>
       <label class="modal-check-row">
         <input type="checkbox" class="chk-item" value="auxiliary">
@@ -1364,6 +1376,10 @@ _MEMORY_HTML = r"""<!DOCTYPE html>
       <span class="nav-icon">💭</span> Recognitions
       <span class="nav-count" id="cnt-recognitions">-</span>
     </div>
+    <div class="nav-item" onclick="showSection('consolidated')" id="nav-consolidated">
+      <span class="nav-icon">🔮</span> Consolidated
+      <span class="nav-count" id="cnt-consolidated">-</span>
+    </div>
   </div>
 
   <!-- 右侧内容 -->
@@ -1381,20 +1397,22 @@ _MEMORY_HTML = r"""<!DOCTYPE html>
 
 <script>
 let _currentSection = null
-let _eventsData = [], _recognitionsData = []
+let _eventsData = [], _recognitionsData = [], _consolidatedData = []
 let _selectedFile = null
 
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 async function init() {
-  // 预加载文件数量
-  const [ev, rc] = await Promise.all([
+  const [ev, rc, co] = await Promise.all([
     fetch('/memory/files?type=events').then(r=>r.json()),
     fetch('/memory/files?type=recognitions').then(r=>r.json()),
+    fetch('/memory/files?type=consolidated').then(r=>r.json()),
   ])
   _eventsData = ev.files
   _recognitionsData = rc.files
+  _consolidatedData = co.files
   document.getElementById('cnt-events').textContent = ev.files.length
   document.getElementById('cnt-recognitions').textContent = rc.files.length
+  document.getElementById('cnt-consolidated').textContent = co.files.length
 }
 init()
 
@@ -1417,6 +1435,7 @@ function showSection(sec) {
     keywords:     showKeywords,
     events:       () => showFileSection('events'),
     recognitions: () => showFileSection('recognitions'),
+    consolidated: () => showFileSection('consolidated'),
   }
   handlers[sec]?.()
 }
@@ -1566,10 +1585,11 @@ async function showKeywords() {
 
 // ── Events / Recognitions ─────────────────────────────────────────────────────
 async function showFileSection(type) {
-  const label = type === 'events' ? 'Events' : 'Recognitions'
-  setHeader(label, `memory/${type}/`)
+  const labelMap = {events:'Events', recognitions:'Recognitions', consolidated:'Consolidated'}
+  setHeader(labelMap[type] || type, `memory/${type}/`)
   const d = await fetch(`/memory/files?type=${type}`).then(r=>r.json())
   if (type === 'events') _eventsData = d.files
+  else if (type === 'consolidated') _consolidatedData = d.files
   else _recognitionsData = d.files
   document.getElementById(`cnt-${type}`).textContent = d.files.length
 
@@ -1646,18 +1666,20 @@ async function deleteFile(path, name) {
   if (card) card.remove()
   document.getElementById('fv-detail').innerHTML = '<div class="empty-hint">已删除。</div>'
   // 更新侧边栏计数
-  const type = path.startsWith('events/') ? 'events' : 'recognitions'
+  let type = 'recognitions'
+  if (path.startsWith('events/')) type = 'events'
+  else if (path.startsWith('consolidated/')) type = 'consolidated'
   const cntEl = document.getElementById('cnt-' + type)
   if (cntEl) cntEl.textContent = Math.max(0, parseInt(cntEl.textContent||'0') - 1)
   _selectedFile = null
 }
 
 async function openFileByPath(path) {
-  // 判断类型并跳转到对应分区
-  const type = path.startsWith('events/') ? 'events' : 'recognitions'
+  let type = 'recognitions'
+  if (path.startsWith('events/')) type = 'events'
+  else if (path.startsWith('consolidated/')) type = 'consolidated'
   const name = path.split('/').pop()
   await showFileSection(type)
-  // 等 DOM 渲染后选中
   setTimeout(() => viewFile(path, name), 50)
 }
 

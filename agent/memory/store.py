@@ -203,10 +203,15 @@ def delete_memory_file(path: str) -> bool:
     """
     _require_init()
     fp = (_MEMORY_DIR / path).resolve()  # type: ignore[operator]
-    events_dir       = _EVENTS_DIR.resolve()       # type: ignore[union-attr]
+    events_dir       = _EVENTS_DIR.resolve()        # type: ignore[union-attr]
     recognitions_dir = _RECOGNITIONS_DIR.resolve()  # type: ignore[union-attr]
-    # 只允许删除 events/ 或 recognitions/ 下的 .md 文件
-    if not (str(fp).startswith(str(events_dir)) or str(fp).startswith(str(recognitions_dir))):
+    consolidated_dir = _CONSOLIDATED_DIR.resolve()  # type: ignore[union-attr]
+    allowed = (
+        str(fp).startswith(str(events_dir))
+        or str(fp).startswith(str(recognitions_dir))
+        or str(fp).startswith(str(consolidated_dir))
+    )
+    if not allowed:
         raise ValueError(f"不允许删除该路径：{path}")
     if not fp.exists():
         return False
@@ -473,6 +478,15 @@ def clear_recognitions() -> int:
     _require_init()
     count = 0
     for f in _RECOGNITIONS_DIR.glob("*.md"):  # type: ignore[union-attr]
+        f.unlink()
+        count += 1
+    return count
+
+
+def clear_consolidated() -> int:
+    _require_init()
+    count = 0
+    for f in _CONSOLIDATED_DIR.glob("*.md"):  # type: ignore[union-attr]
         f.unlink()
         count += 1
     return count
