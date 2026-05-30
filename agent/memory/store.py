@@ -9,29 +9,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── 路径变量（由 init() 设置）────────────────────────────────────────────────
-_MEMORY_DIR:       Path | None = None
-_EVENTS_DIR:       Path | None = None
-_RECOGNITIONS_DIR: Path | None = None
-_MEMORY_INDEX:     Path | None = None
-_KEYWORDS_FILE:    Path | None = None
-_PURPOSE_FILE:     Path | None = None
+_MEMORY_DIR:          Path | None = None
+_EVENTS_DIR:          Path | None = None
+_RECOGNITIONS_DIR:    Path | None = None
+_CONSOLIDATED_DIR:    Path | None = None
+_MEMORY_INDEX:        Path | None = None
+_KEYWORDS_FILE:       Path | None = None
+_PURPOSE_FILE:        Path | None = None
+_DREAM_STATE_FILE:    Path | None = None
 
 
 def init(profile_dir: str | Path) -> None:
     """根据 profile 文件夹路径初始化所有记忆路径，并确保目录存在。"""
-    global _MEMORY_DIR, _EVENTS_DIR, _RECOGNITIONS_DIR
-    global _MEMORY_INDEX, _KEYWORDS_FILE, _PURPOSE_FILE
+    global _MEMORY_DIR, _EVENTS_DIR, _RECOGNITIONS_DIR, _CONSOLIDATED_DIR
+    global _MEMORY_INDEX, _KEYWORDS_FILE, _PURPOSE_FILE, _DREAM_STATE_FILE
 
     base = Path(profile_dir) / "memory"
-    _MEMORY_DIR       = base
-    _EVENTS_DIR       = base / "events"
-    _RECOGNITIONS_DIR = base / "recognitions"
-    _MEMORY_INDEX     = base / "Memory.md"
-    _KEYWORDS_FILE    = base / "keywords.md"
-    _PURPOSE_FILE     = base / "purpose.md"
+    _MEMORY_DIR        = base
+    _EVENTS_DIR        = base / "events"
+    _RECOGNITIONS_DIR  = base / "recognitions"
+    _CONSOLIDATED_DIR  = base / "consolidated"
+    _MEMORY_INDEX      = base / "Memory.md"
+    _KEYWORDS_FILE     = base / "keywords.md"
+    _PURPOSE_FILE      = base / "purpose.md"
+    _DREAM_STATE_FILE  = base / "dream_state.md"
 
     _EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     _RECOGNITIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _CONSOLIDATED_DIR.mkdir(parents=True, exist_ok=True)
 
     if not _MEMORY_INDEX.exists():
         _MEMORY_INDEX.write_text("# Memory Index\n", encoding="utf-8")
@@ -72,6 +77,11 @@ def get_keywords_file() -> Path:
 def get_memory_index() -> Path:
     _require_init()
     return _MEMORY_INDEX  # type: ignore[return-value]
+
+
+def get_consolidated_dir() -> Path:
+    _require_init()
+    return _CONSOLIDATED_DIR  # type: ignore[return-value]
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
@@ -157,6 +167,7 @@ def create_recognition(
     importance: int,
     keywords: list[str],
     trigger: str = "",
+    sources: list[str] | None = None,
 ) -> Path:
     _require_init()
     file_id  = _next_id(_RECOGNITIONS_DIR, "recog")  # type: ignore[arg-type]
@@ -164,6 +175,7 @@ def create_recognition(
     now      = _now_iso()
     kw_str   = ", ".join(keywords)
     trigger_line = f"Trigger: {trigger}\n" if trigger else ""
+    sources_line = f"Sources: [{', '.join(sources)}]\n" if sources else ""
 
     filepath.write_text(
         f"---\n"
@@ -173,6 +185,7 @@ def create_recognition(
         f"Type: recognition\n"
         f"Importance: {importance}\n"
         f"{trigger_line}"
+        f"{sources_line}"
         f"---\n\n"
         f"{content}\n",
         encoding="utf-8",
@@ -281,6 +294,168 @@ def load_files(filepaths: list[Path | str]) -> list[str]:
         if fp.exists():
             results.append(fp.read_text(encoding="utf-8"))
     return results
+
+
+# ── Dream 相关函数 ────────────────────────────────────────────────────────────
+
+def create_consolidated_memory(
+    description: str,
+    content: str,
+    importance: int,
+    keywords: list[str],
+    sources: list[str],
+) -> Path:
+    """新建一条整合记忆文件，sources 为相对于 memory/ 目录的路径列表。"""
+    _require_init()
+    file_id  = _next_id(_CONSOLIDATED_DIR, "consolidated")  # type: ignore[arg-type]
+    filepath = _CONSOLIDATED_DIR / f"{file_id}.md"  # type: ignore[operator]
+    now      = _now_iso()
+    kw_str   = ", ".join(keywords)
+    src_str  = ", ".join(sources)
+
+    filepath.write_text(
+        f"---\n"
+        f"Description: {description}\n"
+        f"Time: {now}\n"
+        f"Importance: {importance}\n"
+        f"Keywords: [{kw_str}]\n"
+        f"Type: consolidated\n"
+        f"Sources: [{src_str}]\n"
+        f"---\n\n"
+        f"## 内容\n\n{content}\n",
+        encoding="utf-8",
+    )
+    update_memory_index(filepath, description, now, importance)
+    update_keywords(keywords, filepath)
+    return filepath
+
+
+def update_consolidated_memory(
+    filepath: Path | str,
+    new_sources: list[str],
+    new_content: str,
+    added_importance: int,
+    extra_keywords: list[str] | None = None,
+) -> None:
+    """追加来源并重写整合记忆内容，Importance 增加 added_importance。"""
+    _require_init()
+    fp = Path(filepath) if not isinstance(filepath, Path) else filepath
+    if not fp.is_absolute():
+        fp = _MEMORY_DIR / fp  # type: ignore[operator]
+
+    text = fp.read_text(encoding="utf-8")
+
+    # 解析现有 frontmatter
+    fm_match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    if not fm_match:
+        raise ValueError(f"无法解析 frontmatter：{fp}")
+    fm_text = fm_match.group(1)
+
+    # 更新 Importance
+    imp_match = re.search(r"^Importance:\s*(\d+)", fm_text, re.MULTILINE)
+    old_imp = int(imp_match.group(1)) if imp_match else 0
+    new_imp = old_imp + added_importance
+    fm_text = re.sub(r"^Importance:\s*\d+", f"Importance: {new_imp}", fm_text, flags=re.MULTILINE)
+
+    # 追加 Sources
+    src_match = re.search(r"^Sources:\s*\[(.*?)\]", fm_text, re.MULTILINE)
+    if src_match:
+        existing = [s.strip() for s in src_match.group(1).split(",") if s.strip()]
+        merged   = existing + [s for s in new_sources if s not in existing]
+        fm_text  = re.sub(
+            r"^Sources:\s*\[.*?\]",
+            f"Sources: [{', '.join(merged)}]",
+            fm_text,
+            flags=re.MULTILINE,
+        )
+    else:
+        fm_text += f"\nSources: [{', '.join(new_sources)}]"
+
+    # 重写文件
+    fp.write_text(
+        f"---\n{fm_text}\n---\n\n## 内容\n\n{new_content}\n",
+        encoding="utf-8",
+    )
+
+    # 更新 Memory.md 中的 imp 值
+    rel = str(fp.relative_to(_MEMORY_DIR))  # type: ignore[arg-type]
+    if _MEMORY_INDEX.exists():  # type: ignore[union-attr]
+        lines = _MEMORY_INDEX.read_text(encoding="utf-8").splitlines(keepends=True)  # type: ignore[union-attr]
+        new_lines = []
+        for line in lines:
+            if f"({rel.replace(chr(92), '/')})" in line:
+                line = re.sub(r"imp=\d+", f"imp={new_imp}", line)
+            new_lines.append(line)
+        _MEMORY_INDEX.write_text("".join(new_lines), encoding="utf-8")  # type: ignore[union-attr]
+
+    if extra_keywords:
+        update_keywords(extra_keywords, fp)
+
+
+def hide_from_index(rel_paths: list[str]) -> None:
+    """将指定相对路径的记忆从 Memory.md 和 keywords.md 中移除（文件本身保留在磁盘）。"""
+    _require_init()
+    for rel_path in rel_paths:
+        _remove_index_entry(rel_path)
+        _remove_keywords_entry(rel_path)
+
+
+def write_last_dream_time(dt: datetime | None = None) -> None:
+    """写入上次 dream 时间（默认当前时间）到 dream_state.md。"""
+    _require_init()
+    ts = (dt or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    _DREAM_STATE_FILE.write_text(f"last_dream_time: {ts}\n", encoding="utf-8")  # type: ignore[union-attr]
+
+
+def read_last_dream_time() -> datetime | None:
+    """读取上次 dream 时间，文件不存在或解析失败则返回 None。"""
+    _require_init()
+    if not _DREAM_STATE_FILE.exists():  # type: ignore[union-attr]
+        return None
+    for line in _DREAM_STATE_FILE.read_text(encoding="utf-8").splitlines():  # type: ignore[union-attr]
+        m = re.match(r"^last_dream_time:\s*(.+)$", line.strip())
+        if m:
+            try:
+                return datetime.fromisoformat(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def get_new_memory_count(since: datetime) -> int:
+    """统计 since 时间之后新增的记忆数（events + recognitions，不含 consolidated）。"""
+    _require_init()
+    count = 0
+    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR):
+        for fp in directory.glob("*.md"):  # type: ignore[union-attr]
+            text = fp.read_text(encoding="utf-8")
+            m = re.search(r"^Time:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                try:
+                    t = datetime.fromisoformat(m.group(1).strip())
+                    if t > since:
+                        count += 1
+                except ValueError:
+                    pass
+    return count
+
+
+def get_memories_since(since: datetime) -> list[Path]:
+    """返回 since 时间之后新增的记忆文件路径列表（events + recognitions）。"""
+    _require_init()
+    result = []
+    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR):
+        for fp in sorted(directory.glob("*.md")):  # type: ignore[union-attr]
+            text = fp.read_text(encoding="utf-8")
+            m = re.search(r"^Time:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                try:
+                    t = datetime.fromisoformat(m.group(1).strip())
+                    if t > since:
+                        result.append(fp)
+                except ValueError:
+                    pass
+    return result
 
 
 # ── 清除函数 ──────────────────────────────────────────────────────────────────

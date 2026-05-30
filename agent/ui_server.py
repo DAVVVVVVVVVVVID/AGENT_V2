@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from openai import OpenAI
 
 from agent.config import load_config
+from agent.dream import Dream, DreamConfig, DreamTrigger
 from agent.execute import Execute
 from agent.logger import AgentLogger
 from agent.loop import run as run_loop
@@ -102,12 +103,20 @@ def _run_loop_thread() -> None:
         )
         executor  = Execute(_client, entity_id=_player_id)
 
+        dream_cfg     = DreamConfig(**cfg.get("dream", {}))
+        dream_trigger = DreamTrigger(dream_cfg)
+
         def emit(msg: dict) -> None:
             if _stop_flag.is_set():
                 raise InterruptedError("loop stopped by user")
             _msg_queue.put(msg)
             if logger:
                 logger.log_emit(msg)
+
+        dreamer = Dream(
+            name=cfg["name"], llm=llm, model=cfg["model"],
+            emit=emit, agent_logger=logger,
+        )
 
         run_loop(
             perceiver=perceiver, retriever=retriever,
@@ -119,6 +128,8 @@ def _run_loop_thread() -> None:
             interrupt_flag=_interrupt_flag,
             use_file_plans_flag=_use_file_plans_flag,
             shared_state=_shared_state,
+            dream_trigger=dream_trigger,
+            dreamer=dreamer,
         )
     except InterruptedError:
         _msg_queue.put({"type": "warning", "content": "循环已手动停止。"})
@@ -183,11 +194,13 @@ def player_force_reset() -> dict:
 
 @app.get("/loop-status")
 def loop_status() -> dict:
+    last_dream = store.read_last_dream_time()
     return {
-        "running":      _loop_thread is not None and _loop_thread.is_alive(),
-        "current_plan": _shared_state.get("current_plan", ""),
-        "plan_batch":   _shared_state.get("plan_batch", []),
-        "plan_index":   _shared_state.get("plan_index", 0),
+        "running":         _loop_thread is not None and _loop_thread.is_alive(),
+        "current_plan":    _shared_state.get("current_plan", ""),
+        "plan_batch":      _shared_state.get("plan_batch", []),
+        "plan_index":      _shared_state.get("plan_index", 0),
+        "last_dream_time": last_dream.isoformat() if last_dream else None,
     }
 
 
@@ -530,6 +543,7 @@ _HTML = r"""<!DOCTYPE html>
   #status-badge.paused   { background: #451a03; color: #fbbf24; }
   #status-badge.stopping { background: #450a0a; color: #f87171; }
   #status-badge.pending  { background: #1c1917; color: #d97706; }
+  #status-badge.dreaming { background: #1e1a3f; color: #818cf8; }
   .log-toggle-wrap { margin-left: auto; display: flex; align-items: center; gap: 10px; }
   .log-toggle-label { font-size: 12px; color: #6b7280; white-space: nowrap; }
   .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
@@ -596,7 +610,10 @@ _HTML = r"""<!DOCTYPE html>
   .log-entry.result   { border-color: #059669; }
   .log-entry.finish   { border-color: #d97706; }
   .log-entry.warning  { border-color: #dc2626; }
-  .log-entry.inject   { border-color: #0891b2; }
+  .log-entry.inject      { border-color: #0891b2; }
+  .log-entry.dream-start { border-color: #818cf8; }
+  .log-entry.dream-step  { border-color: #6366f1; }
+  .log-entry.dream-end   { border-color: #4f46e5; }
   .log-tag  { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 3px; }
   .log-entry.outer    .log-tag { color: #c4b5fd; }
   .log-entry.plan-b   .log-tag { color: #22d3ee; }
@@ -607,7 +624,10 @@ _HTML = r"""<!DOCTYPE html>
   .log-entry.result   .log-tag { color: #34d399; }
   .log-entry.finish   .log-tag { color: #fbbf24; }
   .log-entry.warning  .log-tag { color: #f87171; }
-  .log-entry.inject   .log-tag { color: #22d3ee; }
+  .log-entry.inject      .log-tag { color: #22d3ee; }
+  .log-entry.dream-start .log-tag { color: #818cf8; }
+  .log-entry.dream-step  .log-tag { color: #6366f1; }
+  .log-entry.dream-end   .log-tag { color: #4f46e5; }
   .log-text { font-size: 12px; color: #d1d5db; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 
   /* chat */
@@ -957,6 +977,13 @@ function appendLog(msg) {
     cls='warning'; tag='警告'; text=msg.content
   } else if (msg.type === 'user_inject') {
     cls='inject'; tag='用户指引'; text=msg.content
+  } else if (msg.type === 'dream_start') {
+    cls='dream-start'; tag='Dream 开始'; text='进入认知整理状态…'
+  } else if (msg.type === 'dream_step') {
+    const stepLabel = {read:'阅读',consolidate:'整合',reflect:'提炼',purpose:'Purpose 更新'}[msg.step] || msg.step
+    cls='dream-step'; tag=`Dream · ${stepLabel}`; text=msg.summary||''
+  } else if (msg.type === 'dream_end') {
+    cls='dream-end'; tag='Dream 结束'; text=`Purpose: ${msg.purpose_action||''}`
   }
 
   div.className = `log-entry ${cls}`
@@ -1087,6 +1114,12 @@ function connectWS() {
       setTimeout(()=>{ setLoopState('idle'); fetch('/logging').then(r=>r.json()).then(renderLogStatus) },300)
     } else if (msg.type==='log_start') {
       renderLogStatus({enabled:true,log_path:msg.path})
+    } else if (msg.type==='dream_start') {
+      statusBadge.textContent='做梦中'; statusBadge.className='dreaming'
+      appendLog(msg)
+    } else if (msg.type==='dream_end') {
+      statusBadge.textContent='运行中'; statusBadge.className='running'
+      appendLog(msg)
     } else {
       appendLog(msg)
       // 新 Plan 开始 或 中断完成 → 中断按钮可用

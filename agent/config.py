@@ -5,11 +5,23 @@ from pathlib import Path
 import yaml
 
 
+_DREAM_DEFAULTS = {
+    "memory_count": -1,
+    "time_minutes": -1,
+    "time_of_day": None,
+}
+
+
 def load_config(profile_dir: str | Path) -> dict:
     """从 profile 文件夹中读取 config.yaml 并返回配置字典。"""
     path = Path(profile_dir) / "config.yaml"
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    # 补全 dream 默认值
+    dream_raw = cfg.get("dream") or {}
+    cfg["dream"] = {**_DREAM_DEFAULTS, **dream_raw}
+    return cfg
 
 
 # 兜底默认值（不指定 profile 时使用）

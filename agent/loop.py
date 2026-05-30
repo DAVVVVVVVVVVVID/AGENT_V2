@@ -14,6 +14,7 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+from agent.dream import Dream, DreamTrigger
 from agent.execute import Execute
 from agent.memory import shadow, store
 from agent.perceive import Perceive
@@ -193,6 +194,8 @@ def run(
     interrupt_flag: threading.Event | None = None,
     use_file_plans_flag: threading.Event | None = None,
     shared_state: dict | None = None,
+    dream_trigger: DreamTrigger | None = None,
+    dreamer: Dream | None = None,
 ) -> None:
     """
     Run the autonomous two-level loop indefinitely.
@@ -272,6 +275,8 @@ def run(
                             pass
                     if reply == "__interrupted__":
                         break
+                    if dream_trigger is not None and dreamer is not None and dream_trigger.should_dream():
+                        dreamer.run()
                 continue
 
         # ── Outer Perceive ────────────────────────────────────────────────────
@@ -345,3 +350,6 @@ def run(
                     store.set_plan_status(idx - 1, "done")
             except Exception:
                 pass
+
+            if dream_trigger is not None and dreamer is not None and dream_trigger.should_dream():
+                dreamer.run()

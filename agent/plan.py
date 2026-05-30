@@ -45,7 +45,7 @@ def _build_system_prompt(name: str) -> str:
         f"\n【记忆索引】\n{memory_index}" if "- [" in memory_index else ""
     )
     return (
-        f"你是{name}的规划助手，负责根据最高目标（Purpose）制定当前阶段的行动计划。\n\n"
+        f"你是{name}，根据最高目标（Purpose）制定当前阶段的行动计划。\n\n"
         "【规划原则】\n"
         "- 将 Purpose 分解为若干个具体、可执行的 Plan\n"
         "- 每个 Plan 是一个明确的目标描述（如「去厨房吃东西」），不涉及具体步骤\n"
@@ -63,7 +63,6 @@ def _build_user_message(
     retrieved_memories: list[str],
 ) -> str:
     parts = [
-        f"【角色】\n{name}",
         f"【Purpose（最高目标）】\n{purpose}",
     ]
 

@@ -16,3 +16,7 @@ common_sense:
 llm_base_url: http://localhost:11435/v1
 model: qwen3:32b
 vision_size: 3
+dream:
+  memory_count: 20
+  time_minutes: 30
+  time_of_day: null
