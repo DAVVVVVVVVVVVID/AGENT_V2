@@ -8,20 +8,75 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── 路径常量（以 store.py 位置推导项目根目录）────────────────────────────────
-_PROJECT_ROOT   = Path(__file__).parent.parent.parent
-MEMORY_DIR      = _PROJECT_ROOT / "memory"
-EVENTS_DIR      = MEMORY_DIR / "events"
-RECOGNITIONS_DIR = MEMORY_DIR / "recognitions"
-MEMORY_INDEX    = MEMORY_DIR / "Memory.md"
-KEYWORDS_FILE   = MEMORY_DIR / "keywords.md"
-PURPOSE_FILE    = MEMORY_DIR / "purpose.md"
+# ── 路径变量（由 init() 设置）────────────────────────────────────────────────
+_MEMORY_DIR:       Path | None = None
+_EVENTS_DIR:       Path | None = None
+_RECOGNITIONS_DIR: Path | None = None
+_MEMORY_INDEX:     Path | None = None
+_KEYWORDS_FILE:    Path | None = None
+_PURPOSE_FILE:     Path | None = None
+
+
+def init(profile_dir: str | Path) -> None:
+    """根据 profile 文件夹路径初始化所有记忆路径，并确保目录存在。"""
+    global _MEMORY_DIR, _EVENTS_DIR, _RECOGNITIONS_DIR
+    global _MEMORY_INDEX, _KEYWORDS_FILE, _PURPOSE_FILE
+
+    base = Path(profile_dir) / "memory"
+    _MEMORY_DIR       = base
+    _EVENTS_DIR       = base / "events"
+    _RECOGNITIONS_DIR = base / "recognitions"
+    _MEMORY_INDEX     = base / "Memory.md"
+    _KEYWORDS_FILE    = base / "keywords.md"
+    _PURPOSE_FILE     = base / "purpose.md"
+
+    _EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    _RECOGNITIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not _MEMORY_INDEX.exists():
+        _MEMORY_INDEX.write_text("# Memory Index\n", encoding="utf-8")
+    if not _KEYWORDS_FILE.exists():
+        _KEYWORDS_FILE.write_text(
+            "# Keywords Index\n# 格式：keyword: count, [file1.md, file2.md, ...]\n",
+            encoding="utf-8",
+        )
+    if not _PURPOSE_FILE.exists():
+        _PURPOSE_FILE.write_text("", encoding="utf-8")
+
+
+def _require_init() -> None:
+    if _MEMORY_DIR is None:
+        raise RuntimeError("store 未初始化，请先调用 store.init(profile_dir)")
+
+
+def get_memory_dir() -> Path:
+    _require_init()
+    return _MEMORY_DIR  # type: ignore[return-value]
+
+
+def get_events_dir() -> Path:
+    _require_init()
+    return _EVENTS_DIR  # type: ignore[return-value]
+
+
+def get_recognitions_dir() -> Path:
+    _require_init()
+    return _RECOGNITIONS_DIR  # type: ignore[return-value]
+
+
+def get_keywords_file() -> Path:
+    _require_init()
+    return _KEYWORDS_FILE  # type: ignore[return-value]
+
+
+def get_memory_index() -> Path:
+    _require_init()
+    return _MEMORY_INDEX  # type: ignore[return-value]
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
 
 def _next_id(directory: Path, prefix: str) -> str:
-    """返回下一个可用的编号，如 event_003。"""
     nums = []
     for f in directory.glob(f"{prefix}_*.md"):
         try:
@@ -36,11 +91,10 @@ def _now_iso() -> str:
 
 
 def _parse_keywords_file() -> dict[str, tuple[int, list[str]]]:
-    """解析 keywords.md，返回 {keyword: (count, [files])}。"""
     result: dict[str, tuple[int, list[str]]] = {}
-    if not KEYWORDS_FILE.exists():
+    if not _KEYWORDS_FILE.exists():  # type: ignore[union-attr]
         return result
-    for line in KEYWORDS_FILE.read_text(encoding="utf-8").splitlines():
+    for line in _KEYWORDS_FILE.read_text(encoding="utf-8").splitlines():  # type: ignore[union-attr]
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -60,7 +114,7 @@ def _write_keywords_file(data: dict[str, tuple[int, list[str]]]) -> None:
     ]
     for kw, (count, files) in data.items():
         lines.append(f"{kw}: {count}, [{', '.join(files)}]\n")
-    KEYWORDS_FILE.write_text("".join(lines), encoding="utf-8")
+    _KEYWORDS_FILE.write_text("".join(lines), encoding="utf-8")  # type: ignore[union-attr]
 
 
 # ── 公开 API ──────────────────────────────────────────────────────────────────
@@ -73,9 +127,9 @@ def create_event(
     importance: int,
     keywords: list[str],
 ) -> Path:
-    """生成 events/event_NNN.md，同步更新 Memory.md 和 keywords.md。"""
-    file_id  = _next_id(EVENTS_DIR, "event")
-    filepath = EVENTS_DIR / f"{file_id}.md"
+    _require_init()
+    file_id  = _next_id(_EVENTS_DIR, "event")  # type: ignore[arg-type]
+    filepath = _EVENTS_DIR / f"{file_id}.md"  # type: ignore[operator]
     now      = _now_iso()
     kw_str   = ", ".join(keywords)
 
@@ -102,12 +156,14 @@ def create_recognition(
     content: str,
     importance: int,
     keywords: list[str],
+    trigger: str = "",
 ) -> Path:
-    """生成 recognitions/recog_NNN.md，同步更新 Memory.md 和 keywords.md。"""
-    file_id  = _next_id(RECOGNITIONS_DIR, "recog")
-    filepath = RECOGNITIONS_DIR / f"{file_id}.md"
+    _require_init()
+    file_id  = _next_id(_RECOGNITIONS_DIR, "recog")  # type: ignore[arg-type]
+    filepath = _RECOGNITIONS_DIR / f"{file_id}.md"  # type: ignore[operator]
     now      = _now_iso()
     kw_str   = ", ".join(keywords)
+    trigger_line = f"Trigger: {trigger}\n" if trigger else ""
 
     filepath.write_text(
         f"---\n"
@@ -116,6 +172,7 @@ def create_recognition(
         f"Keywords: [{kw_str}]\n"
         f"Type: recognition\n"
         f"Importance: {importance}\n"
+        f"{trigger_line}"
         f"---\n\n"
         f"{content}\n",
         encoding="utf-8",
@@ -125,22 +182,63 @@ def create_recognition(
     return filepath
 
 
-def update_memory_index(
-    filepath: Path,
-    description: str,
-    time: str,
-    importance: int,
-) -> None:
-    """向 Memory.md 追加一行索引记录。"""
-    rel  = filepath.relative_to(MEMORY_DIR)
+def delete_memory_file(path: str) -> bool:
+    """
+    删除 events 或 recognitions 下的记忆文件，同时移除 Memory.md 索引行和 keywords.md 引用。
+    path 为相对于 memory/ 的路径，例如 events/event_001.md。
+    返回 True 表示删除成功，False 表示文件不存在。
+    """
+    _require_init()
+    fp = (_MEMORY_DIR / path).resolve()  # type: ignore[operator]
+    events_dir       = _EVENTS_DIR.resolve()       # type: ignore[union-attr]
+    recognitions_dir = _RECOGNITIONS_DIR.resolve()  # type: ignore[union-attr]
+    # 只允许删除 events/ 或 recognitions/ 下的 .md 文件
+    if not (str(fp).startswith(str(events_dir)) or str(fp).startswith(str(recognitions_dir))):
+        raise ValueError(f"不允许删除该路径：{path}")
+    if not fp.exists():
+        return False
+    fp.unlink()
+    _remove_index_entry(path)
+    _remove_keywords_entry(path)
+    return True
+
+
+def _remove_index_entry(rel_path: str) -> None:
+    """从 Memory.md 中移除包含指定相对路径的行。"""
+    _require_init()
+    if not _MEMORY_INDEX.exists():  # type: ignore[union-attr]
+        return
+    needle = rel_path.replace("\\", "/")
+    lines = _MEMORY_INDEX.read_text(encoding="utf-8").splitlines(keepends=True)  # type: ignore[union-attr]
+    new_lines = [l for l in lines if f"({needle})" not in l]
+    _MEMORY_INDEX.write_text("".join(new_lines), encoding="utf-8")  # type: ignore[union-attr]
+
+
+def _remove_keywords_entry(rel_path: str) -> None:
+    """从 keywords.md 中移除所有对 rel_path 的引用；若某关键词文件列表为空则删除该条目。"""
+    _require_init()
+    data = _parse_keywords_file()
+    needle = rel_path.replace("\\", "/")
+    updated: dict[str, tuple[int, list[str]]] = {}
+    for kw, (count, files) in data.items():
+        new_files = [f for f in files if f.replace("\\", "/") != needle]
+        if new_files:
+            updated[kw] = (count, new_files)
+        # 文件列表为空则直接丢弃该关键词条目
+    _write_keywords_file(updated)
+
+
+def update_memory_index(filepath: Path, description: str, time: str, importance: int) -> None:
+    _require_init()
+    rel  = filepath.relative_to(_MEMORY_DIR)  # type: ignore[arg-type]
     name = filepath.stem
-    with MEMORY_INDEX.open("a", encoding="utf-8") as f:
+    with _MEMORY_INDEX.open("a", encoding="utf-8") as f:  # type: ignore[union-attr]
         f.write(f"- [{name}]({rel}) — {description} | {time} | imp={importance}\n")
 
 
 def update_keywords(keywords: list[str], filepath: Path) -> None:
-    """更新 keywords.md：计数 +1，将文件加入反向索引（去重）。"""
-    rel  = str(filepath.relative_to(MEMORY_DIR))
+    _require_init()
+    rel  = str(filepath.relative_to(_MEMORY_DIR))  # type: ignore[arg-type]
     data = _parse_keywords_file()
 
     for kw in keywords:
@@ -156,30 +254,30 @@ def update_keywords(keywords: list[str], filepath: Path) -> None:
 
 
 def get_keywords_index() -> dict[str, list[str]]:
-    """返回关键词反向索引 {keyword: [filepath, ...]}，供 retrieve.py 使用。"""
+    _require_init()
     data = _parse_keywords_file()
     return {kw: files for kw, (count, files) in data.items()}
 
 
 def read_purpose() -> str:
-    """返回 purpose.md 全文。"""
-    return PURPOSE_FILE.read_text(encoding="utf-8").strip()
+    _require_init()
+    return _PURPOSE_FILE.read_text(encoding="utf-8").strip()  # type: ignore[union-attr]
 
 
 def load_memory_index() -> str:
-    """返回 Memory.md 全文（用于注入 system prompt）。"""
-    if not MEMORY_INDEX.exists():
+    _require_init()
+    if not _MEMORY_INDEX.exists():  # type: ignore[union-attr]
         return ""
-    return MEMORY_INDEX.read_text(encoding="utf-8")
+    return _MEMORY_INDEX.read_text(encoding="utf-8")  # type: ignore[union-attr]
 
 
 def load_files(filepaths: list[Path | str]) -> list[str]:
-    """读取指定记忆文件列表，返回各文件全文。路径可为绝对或相对于 memory/。"""
+    _require_init()
     results = []
     for fp in filepaths:
         fp = Path(fp) if not isinstance(fp, Path) else fp
         if not fp.is_absolute():
-            fp = MEMORY_DIR / fp
+            fp = _MEMORY_DIR / fp  # type: ignore[operator]
         if fp.exists():
             results.append(fp.read_text(encoding="utf-8"))
     return results
@@ -188,32 +286,97 @@ def load_files(filepaths: list[Path | str]) -> list[str]:
 # ── 清除函数 ──────────────────────────────────────────────────────────────────
 
 def clear_events() -> int:
-    """删除所有 event 记忆文件，返回删除数量。"""
+    _require_init()
     count = 0
-    for f in EVENTS_DIR.glob("*.md"):
+    for f in _EVENTS_DIR.glob("*.md"):  # type: ignore[union-attr]
         f.unlink()
         count += 1
     return count
 
 
 def clear_recognitions() -> int:
-    """删除所有 recognition 记忆文件，返回删除数量。"""
+    _require_init()
     count = 0
-    for f in RECOGNITIONS_DIR.glob("*.md"):
+    for f in _RECOGNITIONS_DIR.glob("*.md"):  # type: ignore[union-attr]
         f.unlink()
         count += 1
     return count
 
 
 def clear_auxiliary() -> None:
-    """重置 Memory.md 索引和 keywords.md 反向索引。"""
-    MEMORY_INDEX.write_text("# Memory Index\n", encoding="utf-8")
-    KEYWORDS_FILE.write_text(
+    _require_init()
+    _MEMORY_INDEX.write_text("# Memory Index\n", encoding="utf-8")  # type: ignore[union-attr]
+    _KEYWORDS_FILE.write_text(  # type: ignore[union-attr]
         "# Keywords Index\n# 格式：keyword: count, [file1.md, file2.md, ...]\n",
         encoding="utf-8",
     )
 
 
 def reset_purpose(content: str) -> None:
-    """覆盖 purpose.md 内容。"""
-    PURPOSE_FILE.write_text(content, encoding="utf-8")
+    _require_init()
+    _PURPOSE_FILE.write_text(content, encoding="utf-8")  # type: ignore[union-attr]
+
+
+def save_plan_batch(plans: list[str]) -> None:
+    """将当前 Plan Batch 写入 current_plans.md，使用状态标记格式。"""
+    _require_init()
+    now = _now_iso()
+    lines = ["# Current Plan Batch\n", f"生成时间: {now}\n\n"]
+    for plan in plans:
+        lines.append(f"- [ ] {plan}\n")
+    (_MEMORY_DIR / "current_plans.md").write_text("".join(lines), encoding="utf-8")  # type: ignore[operator]
+
+
+def read_plan_batch() -> str:
+    """返回 current_plans.md 全文，文件不存在时返回空字符串。"""
+    _require_init()
+    fp = _MEMORY_DIR / "current_plans.md"  # type: ignore[operator]
+    return fp.read_text(encoding="utf-8") if fp.exists() else ""  # type: ignore[union-attr]
+
+
+def read_plan_states() -> list[dict]:
+    """解析 current_plans.md，返回 [{"status": "todo"|"running"|"done"|"interrupted", "text": str}, ...]"""
+    _require_init()
+    fp = _MEMORY_DIR / "current_plans.md"  # type: ignore[operator]
+    if not fp.exists():  # type: ignore[union-attr]
+        return []
+    result = []
+    for line in fp.read_text(encoding="utf-8").splitlines():  # type: ignore[union-attr]
+        m = re.match(r"^-\s+\[([^\]]*)\]\s+(.+)$", line.strip())
+        if m:
+            marker = m.group(1)
+            text   = m.group(2)
+            if marker in ("x", "done"):
+                status = "done"
+            elif marker == "running":
+                status = "running"
+            elif marker == "interrupted":
+                status = "interrupted"
+            else:
+                status = "todo"
+            result.append({"status": status, "text": text})
+    return result
+
+
+def set_plan_status(index: int, status: str) -> None:
+    """将第 index 个（0-based）Plan 的状态更新为 status。"""
+    _require_init()
+    fp = _MEMORY_DIR / "current_plans.md"  # type: ignore[operator]
+    if not fp.exists():  # type: ignore[union-attr]
+        return
+    marker_map = {"todo": " ", "running": "running", "done": "x", "interrupted": "interrupted"}
+    marker = marker_map.get(status, " ")
+    lines = fp.read_text(encoding="utf-8").splitlines()  # type: ignore[union-attr]
+    plan_count = 0
+    new_lines  = []
+    for line in lines:
+        m = re.match(r"^(- \[)[^\]]*(\] .+)$", line)
+        if m:
+            if plan_count == index:
+                new_lines.append(f"{m.group(1)}{marker}{m.group(2)}")
+            else:
+                new_lines.append(line)
+            plan_count += 1
+        else:
+            new_lines.append(line)
+    fp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")  # type: ignore[union-attr]

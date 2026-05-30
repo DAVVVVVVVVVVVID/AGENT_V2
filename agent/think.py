@@ -18,7 +18,11 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_arena_tiles",
-            "description": "获取指定 arena 内所有 tile 的坐标列表。",
+            "description": (
+                "获取指定 arena 内所有 tile 的坐标列表。"
+                "用于在不清楚具体目标坐标时探索某个场所的可用位置，"
+                "获取后可从中挑选合适的 tile 再调用 move_to_tile 前往。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -32,7 +36,11 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_object_position",
-            "description": "获取指定 object 的坐标（锚点位置）。",
+            "description": (
+                "获取指定 object 的锚点坐标，同时返回其周围所有可行走的相邻格子列表（adjacent_walkable）。"
+                "重要：object 本身占据的格子不可行走，不能直接 move_to_tile 到 object 的坐标。"
+                "正确流程：调用本工具获取 adjacent_walkable → 从中选一个格子 move_to_tile → turn 面向 object → use_object 或 observe_object。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -46,7 +54,12 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "move_to_tile",
-            "description": "移动到指定坐标的 tile。",
+            "description": (
+                "移动到指定坐标的 tile。"
+                "这是有明确目标时的首选移动方式，大多数目标移动都应使用此工具。"
+                "适用场景：已知目标坐标（来自 get_object_position、get_arena_tiles 等）时直接前往。"
+                "不适合：目标坐标未知时的探索或试探性移动（用 move_direction）；跨区域移动（用 move_to_area）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -61,7 +74,11 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "move_direction",
-            "description": "向某方向移动 N 格，逐格校验可行走性，遇阻停止。",
+            "description": (
+                "向某方向移动最多 N 格，逐格校验可行走性，遇阻自动停止。"
+                "适用场景：无具体目标坐标时的探索、闲逛、试探性移动，或需要微调当前位置时。"
+                "不适合：已知目标坐标的移动（用 move_to_tile 更精确高效）；跨区域移动（用 move_to_area）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,7 +101,10 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "turn",
-            "description": "转向某方向，不移动。",
+            "description": (
+                "原地转向某方向，不产生移动。"
+                "use_object 和 observe_object 要求必须面向目标 object，因此在调用它们之前必须先用 turn 调整朝向。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -101,7 +121,12 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "use_object",
-            "description": "使用正前方的对象（需先面向该对象）。",
+            "description": (
+                "与正前方的 object 进行交互，触发其功能（如使用工具、进入场景、执行操作等），会改变游戏状态。"
+                "严格前置条件（缺一不可）：① 已移动到该 object 的相邻可行走格（adjacent_walkable 中的某个坐标）；② 已 turn 面向该 object。"
+                "与 observe_object 的区别：observe_object 只读取信息不改变状态；use_object 触发真实交互。"
+                "使用后如需离开，调用 leave_object 恢复 idle 状态。"
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -109,7 +134,12 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "observe_object",
-            "description": "阅读正前方对象的描述，不改变任何状态。",
+            "description": (
+                "读取正前方 object 的描述信息，不触发任何交互，不改变任何状态。"
+                "适用场景：想了解某个 object 是什么、有什么功能，但尚未决定是否使用时。"
+                "前置条件与 use_object 相同：需已移动到相邻格并 turn 面向目标。"
+                "与 use_object 的区别：本工具只读信息；use_object 才真正触发交互。"
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -117,7 +147,10 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "leave_object",
-            "description": "退出当前正在使用的对象，恢复 idle 状态。",
+            "description": (
+                "退出当前正在使用/占用的 object，将状态恢复为 idle。"
+                "在完成一个 object 的使用后，必须调用本工具才能自由移动或使用其他 object。"
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -125,18 +158,22 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "move_to_area",
-            "description": "移动到目标区域内随机一个可行走位置。",
+            "description": (
+                "跨区域移动：移动到目标区域（arena / sector / world）内距离当前位置最近的可行走 tile。"
+                "适用场景：已知目标区域 ID，需要前往该区域但不关心具体落点时。"
+                "不适合：已知具体目标坐标（用 move_to_tile）；在当前区域内的局部移动（用 move_to_tile 或 move_direction）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "area_type": {
                         "type": "string",
                         "enum": ["arena", "sector", "world"],
-                        "description": "区域类型",
+                        "description": "区域类型：arena（具体场所）、sector（区域）、world（整个世界）",
                     },
                     "area_id": {
                         "type": "string",
-                        "description": "区域 ID",
+                        "description": "目标区域的 ID",
                     },
                 },
                 "required": ["area_type", "area_id"],
@@ -146,14 +183,60 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "record_recognition",
+            "description": (
+                "记录一条你自己的主观认知——对事物的看法、规律总结、行动反省、感受或洞察。"
+                "这是你的'内心独白'工具：记录的是你对世界的理解，而非客观事实的陈述。"
+                "可在行动序列中任意时刻调用，不必等到 finish 之前；没有真实所得时不必强制调用。"
+                "记录的内容应对未来的你有参考价值：下次遇到类似情况时能从记忆中检索到并加以利用。"
+                "不会中断后续行动——调用后序列继续执行。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "一句话概括这条认知的核心，将显示在记忆索引中（15字以内为佳）",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "认知的具体内容，第一人称，自然语言，可包含原因、推断、感受等",
+                    },
+                    "trigger": {
+                        "type": "string",
+                        "description": "触发此认知的事件或情境，如'尝试使用热水机失败后'（可选）",
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "关键词列表，用于未来检索（2-5个）",
+                    },
+                    "importance": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "description": "重要程度：1=一般，3=重要，5=非常重要",
+                    },
+                },
+                "required": ["summary", "content", "keywords", "importance"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
-            "description": "当前 Plan 已完成时调用，必须是序列中最后一个行动。",
+            "description": (
+                "宣告当前 Plan 已完成，必须且只能作为行动序列中的最后一个行动。"
+                "只有在 Plan 目标真正达成后才能调用，不能提前或中途调用。"
+                "调用后本轮 Plan 结束，系统将进入下一个 Plan。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "reply": {
                         "type": "string",
-                        "description": "对当前 Plan 目标的总结回复",
+                        "description": "对本次 Plan 执行结果的简要总结",
                     },
                 },
                 "required": ["reply"],
@@ -196,6 +279,47 @@ def _format_arena_tree(tree: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _format_vision(vision_tiles: list[dict], px: int, py: int) -> str:
+    if not vision_tiles:
+        return ""
+
+    tile_map = {(t["x"], t["y"]): t for t in vision_tiles}
+    xs = [t["x"] for t in vision_tiles]
+    ys = [t["y"] for t in vision_tiles]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    rows = []
+    for y in range(min_y, max_y + 1):
+        row = []
+        for x in range(min_x, max_x + 1):
+            if x == px and y == py:
+                row.append("@")
+            elif (x, y) in tile_map:
+                t = tile_map[(x, y)]
+                row.append("O" if t.get("object") else ("·" if t["walkable"] else "#"))
+            else:
+                row.append("?")
+        rows.append(" ".join(row))
+
+    grid = "\n".join(rows)
+
+    obj_tiles = [t for t in vision_tiles if t.get("object")]
+    if obj_tiles:
+        lines = []
+        for t in obj_tiles:
+            arena_id  = t.get("arena") or ""
+            arena_str = f"区域:{arena_id}" if arena_id else "未知区域"
+            obj       = t["object"]
+            walkable  = "可走" if t["walkable"] else "不可走"
+            lines.append(f"  ({t['x']},{t['y']}) {obj['name']}(ID:{obj['id']}) [{walkable}] — {arena_str}")
+        obj_section = "【视野内对象】\n" + "\n".join(lines)
+    else:
+        obj_section = "【视野内对象】无"
+
+    return f"【视野】（· 可走  # 不可走  O 有对象  @ 自身）\n{grid}\n\n{obj_section}"
+
+
 def _format_perception(perceive_result: dict) -> str:
     ps  = perceive_result["player_state"]
     pos = ps["position"]
@@ -213,12 +337,16 @@ def _format_perception(perceive_result: dict) -> str:
     )
     state_label = f"，当前使用：{ps['stateLabel']}" if ps.get("stateLabel") else ""
 
+    vision_str = _format_vision(
+        perceive_result["vision_tiles"], pos["x"], pos["y"]
+    )
+
     return (
         f"位置：({pos['x']}, {pos['y']})，朝向：{facing}\n"
         f"hp: {ps['hp']}，energy: {ps['energy']}，状态: {ps['state']}{state_label}\n"
         f"{front_desc}\n"
         f"{diff_desc}\n"
-        f"视野 tile 数：{len(perceive_result['vision_tiles'])}\n"
+        f"\n{vision_str}\n"
         f"\n【环境结构（世界→区域→场所→对象）】\n{_format_arena_tree(perceive_result['arena_tree'])}"
     )
 

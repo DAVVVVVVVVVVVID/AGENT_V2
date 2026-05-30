@@ -2,7 +2,7 @@
 Agent UI server — web dashboard for autonomous agent v2.
 
 Usage:
-    uv run python -m agent.ui_server
+    uv run python -m agent.ui_server --profile profiles/xiao_ming
     then open http://localhost:8001
 """
 
@@ -12,13 +12,14 @@ import json
 import queue
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
 
-from agent.config import AGENT_CONFIG
+from agent.config import load_config
 from agent.execute import Execute
 from agent.logger import AgentLogger
 from agent.loop import run as run_loop
@@ -33,7 +34,8 @@ from agent.retrieve import Retrieve
 from agent.sandbox_client import SandboxClient
 from agent.think import Think
 
-_cfg    = AGENT_CONFIG
+# ── 由 __main__ 在 uvicorn 启动前设置 ─────────────────────────────────────────
+_cfg: dict = {}
 _client = SandboxClient()
 _player_id: str = ""
 
@@ -43,7 +45,9 @@ async def _lifespan(app: FastAPI):
     global _player_id
     pid, _ = _client.join_player(_cfg["name"])
     _player_id = pid
+    heartbeat_stop = _client.start_heartbeat(_player_id, interval=3.0)
     yield
+    heartbeat_stop.set()
     try:
         _client.leave_player(_player_id)
     except Exception:
@@ -53,9 +57,11 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 
 # ── loop state ────────────────────────────────────────────────────────────────
-_loop_thread: threading.Thread | None = None
-_stop_flag   = threading.Event()
-_pause_flag  = threading.Event()
+_loop_thread:         threading.Thread | None = None
+_stop_flag            = threading.Event()
+_pause_flag           = threading.Event()
+_interrupt_flag       = threading.Event()
+_use_file_plans_flag  = threading.Event()
 _pause_flag.set()
 _msg_queue: queue.Queue[dict] = queue.Queue()
 _shared_state: dict = {
@@ -73,37 +79,36 @@ _current_logger: AgentLogger | None = None
 
 def _run_loop_thread() -> None:
     global _current_logger
-    cfg = _cfg
-
+    cfg    = _cfg
     logger: AgentLogger | None = None
-    if _logging_enabled:
-        logger = AgentLogger("autonomous", cfg)
-        _current_logger = logger
-        _msg_queue.put({"type": "log_start", "path": logger.path})
-
-    llm = OpenAI(base_url=cfg["llm_base_url"], api_key="ollama")
-
-    perceiver = Perceive(_client, entity_id=_player_id, vision_size=cfg["vision_size"])
-    retriever = Retrieve(llm, model=cfg["model"])
-    planner   = Planner(name=cfg["name"], llm=llm, model=cfg["model"],
-                        agent_logger=logger)
-    thinker   = Think(
-        name=cfg["name"], ocean=cfg["ocean"],
-        lifestyle=cfg["lifestyle"],
-        common_sense=cfg.get("common_sense", []),
-        llm_base_url=cfg["llm_base_url"], model=cfg["model"],
-        agent_logger=logger,
-    )
-    executor  = Execute(_client, entity_id=_player_id)
-
-    def emit(msg: dict) -> None:
-        if _stop_flag.is_set():
-            raise InterruptedError("loop stopped by user")
-        _msg_queue.put(msg)
-        if logger:
-            logger.log_emit(msg)
-
     try:
+        if _logging_enabled:
+            logger = AgentLogger("autonomous", cfg)
+            _current_logger = logger
+            _msg_queue.put({"type": "log_start", "path": logger.path})
+
+        llm = OpenAI(base_url=cfg["llm_base_url"], api_key="ollama")
+
+        perceiver = Perceive(_client, entity_id=_player_id, vision_size=cfg["vision_size"])
+        retriever = Retrieve(llm, model=cfg["model"])
+        planner   = Planner(name=cfg["name"], llm=llm, model=cfg["model"],
+                            agent_logger=logger)
+        thinker   = Think(
+            name=cfg["name"], ocean=cfg["ocean"],
+            lifestyle=cfg["lifestyle"],
+            common_sense=cfg.get("common_sense", []),
+            llm_base_url=cfg["llm_base_url"], model=cfg["model"],
+            agent_logger=logger,
+        )
+        executor  = Execute(_client, entity_id=_player_id)
+
+        def emit(msg: dict) -> None:
+            if _stop_flag.is_set():
+                raise InterruptedError("loop stopped by user")
+            _msg_queue.put(msg)
+            if logger:
+                logger.log_emit(msg)
+
         run_loop(
             perceiver=perceiver, retriever=retriever,
             planner=planner, thinker=thinker, executor=executor,
@@ -111,6 +116,8 @@ def _run_loop_thread() -> None:
             emit=emit,
             pause_flag=_pause_flag,
             stop_flag=_stop_flag,
+            interrupt_flag=_interrupt_flag,
+            use_file_plans_flag=_use_file_plans_flag,
             shared_state=_shared_state,
         )
     except InterruptedError:
@@ -191,6 +198,8 @@ def start_loop() -> dict:
         return {"ok": False, "reason": "loop already running"}
     _stop_flag.clear()
     _pause_flag.set()
+    _interrupt_flag.clear()
+    _use_file_plans_flag.clear()
     while not _msg_queue.empty():
         _msg_queue.get_nowait()
     _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0})
@@ -236,6 +245,37 @@ def pause_loop() -> dict:
 def resume_loop() -> dict:
     _pause_flag.set()
     return {"ok": True}
+
+
+@app.post("/loop/interrupt")
+def interrupt_plan() -> dict:
+    if not (_loop_thread and _loop_thread.is_alive()):
+        return {"ok": False, "reason": "no loop running"}
+    _interrupt_flag.set()
+    return {"ok": True}
+
+
+@app.post("/loop/use-file-plans")
+def use_file_plans() -> dict:
+    global _loop_thread
+    states = store.read_plan_states()
+    todo_count = sum(1 for s in states if s["status"] == "todo")
+    if todo_count == 0:
+        return {"ok": False, "reason": "文件中没有待执行的 Plan（状态为 [ ]）"}
+    _use_file_plans_flag.set()
+    if _loop_thread and _loop_thread.is_alive():
+        _interrupt_flag.set()
+        return {"ok": True, "todo_count": todo_count, "started": False}
+    # 未运行时：直接启动 loop，use_file_plans_flag 已 set，第一轮会跳过规划
+    _stop_flag.clear()
+    _pause_flag.set()
+    _interrupt_flag.clear()
+    while not _msg_queue.empty():
+        _msg_queue.get_nowait()
+    _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0})
+    _loop_thread = threading.Thread(target=_run_loop_thread, daemon=True)
+    _loop_thread.start()
+    return {"ok": True, "todo_count": todo_count, "started": True}
 
 
 @app.post("/chat")
@@ -328,6 +368,23 @@ def memory_clear(body: dict) -> dict:
     return {"ok": True, "summary": summary}
 
 
+@app.get("/memory/plans")
+def get_plans() -> dict:
+    raw    = store.read_plan_batch()
+    states = store.read_plan_states()
+    import re as _re
+    m = _re.search(r"生成时间:\s*(.+)", raw)
+    return {"states": states, "generated_at": m.group(1).strip() if m else "", "raw": raw}
+
+
+@app.post("/memory/plans")
+def save_plans(body: dict) -> dict:
+    content = body.get("content", "")
+    fp = store.get_memory_dir() / "current_plans.md"
+    fp.write_text(content, encoding="utf-8")
+    return {"ok": True}
+
+
 @app.get("/memory/purpose")
 def get_purpose() -> dict:
     return {"content": store.read_purpose()}
@@ -346,7 +403,7 @@ def set_purpose(body: dict) -> dict:
 def memory_files(type: str = "events") -> dict:
     """返回 events 或 recognitions 的文件列表，含 frontmatter 元数据。"""
     import re
-    directory = store.EVENTS_DIR if type == "events" else store.RECOGNITIONS_DIR
+    directory = store.get_events_dir() if type == "events" else store.get_recognitions_dir()
     files = []
     for f in sorted(directory.glob("*.md")):
         text = f.read_text(encoding="utf-8")
@@ -372,11 +429,24 @@ def memory_files(type: str = "events") -> dict:
 @app.get("/memory/file")
 def memory_file(path: str) -> dict:
     """返回指定记忆文件全文。path 为相对于 memory/ 的路径。"""
-    fp = store.MEMORY_DIR / path
-    if not fp.exists() or not fp.is_relative_to(store.MEMORY_DIR):
+    fp = store.get_memory_dir() / path
+    if not fp.exists() or not fp.is_relative_to(store.get_memory_dir()):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="file not found")
     return {"path": path, "content": fp.read_text(encoding="utf-8")}
+
+
+@app.delete("/memory/file")
+def delete_memory_file(path: str) -> dict:
+    """删除指定记忆文件并从 Memory.md 索引中移除。path 为相对于 memory/ 的路径。"""
+    from fastapi import HTTPException
+    try:
+        ok = store.delete_memory_file(path)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=404, detail="file not found")
+    return {"ok": True}
 
 
 @app.get("/memory/keywords-data")
@@ -384,8 +454,8 @@ def memory_keywords_data() -> dict:
     """返回 keywords.md 解析后的数据。"""
     import re
     rows = []
-    if store.KEYWORDS_FILE.exists():
-        for line in store.KEYWORDS_FILE.read_text(encoding="utf-8").splitlines():
+    if store.get_keywords_file().exists():
+        for line in store.get_keywords_file().read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -406,9 +476,9 @@ def memory_index_data() -> dict:
     """返回 Memory.md 解析后的条目列表。"""
     import re
     entries = []
-    if store.MEMORY_INDEX.exists():
+    if store.get_memory_index().exists():
         pattern = re.compile(r"- \[(.+?)\]\((.+?)\) — (.+?) \| (.+?) \| imp=(\d+)")
-        for line in store.MEMORY_INDEX.read_text(encoding="utf-8").splitlines():
+        for line in store.get_memory_index().read_text(encoding="utf-8").splitlines():
             m = pattern.match(line.strip())
             if m:
                 entries.append({
@@ -456,8 +526,10 @@ _HTML = r"""<!DOCTYPE html>
   header { padding: 12px 20px; background: #1a1d27; border-bottom: 1px solid #2d3148; display: flex; align-items: center; gap: 12px; }
   header h1 { font-size: 16px; font-weight: 600; color: #a78bfa; }
   #status-badge { font-size: 11px; padding: 2px 10px; border-radius: 10px; background: #1e2235; color: #6b7280; }
-  #status-badge.running { background: #052e16; color: #4ade80; }
-  #status-badge.paused  { background: #451a03; color: #fbbf24; }
+  #status-badge.running  { background: #052e16; color: #4ade80; }
+  #status-badge.paused   { background: #451a03; color: #fbbf24; }
+  #status-badge.stopping { background: #450a0a; color: #f87171; }
+  #status-badge.pending  { background: #1c1917; color: #d97706; }
   .log-toggle-wrap { margin-left: auto; display: flex; align-items: center; gap: 10px; }
   .log-toggle-label { font-size: 12px; color: #6b7280; white-space: nowrap; }
   .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
@@ -570,6 +642,12 @@ _HTML = r"""<!DOCTYPE html>
   #btn-stop  { background: #7f1d1d; color: #fca5a5; }
   #btn-stop:hover     { background: #991b1b; }
   #btn-stop:disabled  { background: #1f2937; color: #4b5563; cursor: not-allowed; }
+  #btn-interrupt { background: #78350f; color: #fed7aa; }
+  #btn-interrupt:hover    { background: #92400e; }
+  #btn-interrupt:disabled { background: #1f2937; color: #4b5563; cursor: not-allowed; }
+  #btn-use-file  { background: #1e3a5f; color: #93c5fd; border: 1px solid #1d4ed8; }
+  #btn-use-file:hover    { background: #1d4ed8; color: #fff; }
+  #btn-use-file:disabled { background: #1f2937; color: #4b5563; cursor: not-allowed; border-color: transparent; }
   #btn-clear-mem { background: #1c1917; color: #78716c; border: 1px solid #292524; }
   #btn-clear-mem:hover { background: #292524; color: #a8a29e; }
   .footer-info { font-size: 12px; color: #4b5563; margin-left: auto; }
@@ -700,6 +778,8 @@ _HTML = r"""<!DOCTYPE html>
   <button id="btn-start" onclick="startLoop()">启动</button>
   <button id="btn-pause" disabled onclick="togglePause()">暂停</button>
   <button id="btn-stop"  disabled onclick="stopLoop()">停止</button>
+  <button id="btn-interrupt" disabled onclick="interruptPlan()" title="中断当前 Plan，重新规划">中断 Plan</button>
+  <button id="btn-use-file"  onclick="useFilePlans()" title="直接执行文件中的 [ ] Plan，不重新规划">执行文件 Plan</button>
   <button id="btn-clear-mem" onclick="openModal()">清除记忆</button>
   <span class="footer-info" id="footer-info"></span>
 </footer>
@@ -711,6 +791,8 @@ const statusBadge = document.getElementById('status-badge')
 const btnStart    = document.getElementById('btn-start')
 const btnPause    = document.getElementById('btn-pause')
 const btnStop     = document.getElementById('btn-stop')
+const btnInterrupt  = document.getElementById('btn-interrupt')
+const btnUseFile    = document.getElementById('btn-use-file')
 const footerInfo  = document.getElementById('footer-info')
 const chatSection = document.getElementById('chat-section')
 let ws = null
@@ -842,6 +924,10 @@ function appendLog(msg) {
     cls='plan-b'; tag='Plan Batch'
     text = msg.plans.map((p,i)=>`${i+1}. ${p}`).join('\n')
     renderPlan(msg.plans, 1)
+  } else if (msg.type === 'plan_batch_from_file') {
+    cls='plan-b'; tag='执行文件 Plan'
+    text = msg.plans.map((p,i)=>`${i+1}. ${p}`).join('\n')
+    renderPlan(msg.plans, 1)
   } else if (msg.type === 'plan_start') {
     cls='plan-s'; tag=`Plan ${msg.plan_index}/${msg.total}`
     text = msg.plan
@@ -865,6 +951,8 @@ function appendLog(msg) {
     }).join('\n')
   } else if (msg.type === 'plan_finish') {
     cls='finish'; tag='Plan 完成'; text=msg.reply
+  } else if (msg.type === 'plan_interrupted') {
+    cls='warning'; tag='Plan 已中断'; text=msg.plan||''
   } else if (msg.type === 'warning') {
     cls='warning'; tag='警告'; text=msg.content
   } else if (msg.type === 'user_inject') {
@@ -880,9 +968,11 @@ function appendLog(msg) {
 // ── state machine ────────────────────────────────────────────────────────────
 function setLoopState(state) {
   loopState = state
-  btnStart.disabled = state !== 'idle'
-  btnStop.disabled  = state === 'idle'
-  btnPause.disabled = state === 'idle'
+  btnStart.disabled     = state !== 'idle'
+  btnStop.disabled      = state === 'idle'
+  btnPause.disabled     = state === 'idle'
+  btnInterrupt.disabled = state !== 'running'
+  btnUseFile.disabled   = state === 'paused'
   if (state === 'paused') {
     statusBadge.textContent='已暂停'; statusBadge.className='paused'
     btnPause.textContent='继续'; btnPause.classList.add('resume')
@@ -899,6 +989,15 @@ function setLoopState(state) {
   }
 }
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+function appendPendingLog(text, tag='指令') {
+  const div = document.createElement('div')
+  div.className = 'log-entry warning'
+  div.innerHTML = `<div class="log-tag">${tag}</div><div class="log-text">${esc(text)}</div>`
+  logPanel.appendChild(div)
+  logPanel.scrollTop = logPanel.scrollHeight
+}
+
 // ── controls ─────────────────────────────────────────────────────────────────
 function startLoop() {
   logPanel.innerHTML=''
@@ -910,21 +1009,91 @@ function startLoop() {
     connectWS()
   })
 }
-function stopLoop() { fetch('/stop',{method:'POST'}) }
+function stopLoop() {
+  fetch('/stop',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if (d.ok) {
+      statusBadge.textContent='停止中…'; statusBadge.className='stopping'
+      btnStop.disabled=true; btnPause.disabled=true; btnInterrupt.disabled=true
+      appendPendingLog('⏹ 停止指令已发送，等待当前轮次结束后停止…')
+    }
+  })
+}
 function togglePause() {
-  if (loopState==='running')      fetch('/pause', {method:'POST'})
-  else if (loopState==='paused')  fetch('/resume',{method:'POST'})
+  if (loopState==='running') {
+    btnPause.disabled=true
+    fetch('/pause',{method:'POST'}).then(r=>r.json()).then(d=>{
+      if (d.ok) {
+        statusBadge.textContent='暂停中…'; statusBadge.className='pending'
+        appendPendingLog('⏸ 暂停指令已发送，将在本轮结束后暂停…')
+      } else {
+        btnPause.disabled=false
+      }
+    })
+  } else if (loopState==='paused') {
+    fetch('/resume',{method:'POST'}).then(r=>r.json()).then(d=>{
+      if (d.ok) setLoopState('running')
+    })
+  }
+}
+async function interruptPlan() {
+  btnInterrupt.disabled=true
+  const resp=await fetch('/loop/interrupt',{method:'POST'})
+  const d=await resp.json()
+  if (d.ok) {
+    appendPendingLog('⚡ 中断指令已发送，将在本轮行动结束后重新规划…')
+  } else {
+    appendPendingLog(`中断失败：${esc(d.reason||'unknown')}`)
+    btnInterrupt.disabled=(loopState!=='running')
+  }
+}
+async function useFilePlans() {
+  btnUseFile.disabled = true
+  const resp = await fetch('/loop/use-file-plans',{method:'POST'})
+  const d = await resp.json()
+  if (!d.ok) {
+    const div = document.createElement('div')
+    div.className = 'log-entry warning'
+    div.innerHTML = `<div class="log-tag">执行文件 Plan</div><div class="log-text">失败：${esc(d.reason||'unknown')}</div>`
+    logPanel.appendChild(div)
+    logPanel.scrollTop = logPanel.scrollHeight
+    btnUseFile.disabled = (loopState === 'paused')
+    return
+  }
+  if (d.started) {
+    // 未运行时启动：走与 startLoop 相同的 UI 初始化
+    logPanel.innerHTML = ''
+    document.getElementById('chat-messages').innerHTML = ''
+    planPanel.innerHTML = '<div style="color:#4b5563;font-size:12px;">等待规划…</div>'
+    setLoopState('running')
+    connectWS()
+  }
+  const div = document.createElement('div')
+  div.className = 'log-entry plan-b'
+  div.innerHTML = `<div class="log-tag">执行文件 Plan</div><div class="log-text">将执行文件中 ${d.todo_count} 个待执行 Plan。</div>`
+  logPanel.appendChild(div)
+  logPanel.scrollTop = logPanel.scrollHeight
+  btnUseFile.disabled = (loopState === 'paused')
 }
 function connectWS() {
   if (ws) { ws.close(); ws=null }
   ws = new WebSocket(`ws://${location.host}/ws`)
   ws.onmessage = e => {
     const msg = JSON.parse(e.data)
-    if      (msg.type==='paused')   setLoopState('paused')
-    else if (msg.type==='resumed')  setLoopState('running')
-    else if (msg.type==='loop_end') { setTimeout(()=>{ setLoopState('idle'); fetch('/logging').then(r=>r.json()).then(renderLogStatus) },300) }
-    else if (msg.type==='log_start') renderLogStatus({enabled:true,log_path:msg.path})
-    else appendLog(msg)
+    if (msg.type==='paused') {
+      setLoopState('paused')
+    } else if (msg.type==='resumed') {
+      setLoopState('running')
+    } else if (msg.type==='loop_end') {
+      setTimeout(()=>{ setLoopState('idle'); fetch('/logging').then(r=>r.json()).then(renderLogStatus) },300)
+    } else if (msg.type==='log_start') {
+      renderLogStatus({enabled:true,log_path:msg.path})
+    } else {
+      appendLog(msg)
+      // 新 Plan 开始 或 中断完成 → 中断按钮可用
+      if (msg.type==='plan_start' || msg.type==='plan_interrupted') {
+        btnInterrupt.disabled=false
+      }
+    }
   }
   ws.onclose = () => { ws=null }
 }
@@ -1143,6 +1312,9 @@ _MEMORY_HTML = r"""<!DOCTYPE html>
     <div class="nav-item" onclick="showSection('purpose')" id="nav-purpose">
       <span class="nav-icon">🎯</span> Purpose
     </div>
+    <div class="nav-item" onclick="showSection('plans')" id="nav-plans">
+      <span class="nav-icon">📝</span> Current Plans
+    </div>
     <div class="nav-item" onclick="showSection('index')" id="nav-index">
       <span class="nav-icon">📋</span> Memory Index
     </div>
@@ -1207,12 +1379,84 @@ function showSection(sec) {
   body.innerHTML = '<div class="empty-hint">加载中…</div>'
   const handlers = {
     purpose:      showPurpose,
+    plans:        showPlans,
     index:        showIndex,
     keywords:     showKeywords,
     events:       () => showFileSection('events'),
     recognitions: () => showFileSection('recognitions'),
   }
   handlers[sec]?.()
+}
+
+// ── Current Plans ─────────────────────────────────────────────────────────────
+async function showPlans() {
+  setHeader('Current Plans', 'current_plans.md')
+  const d = await fetch('/memory/plans').then(r=>r.json())
+  const states = d.states || []
+  const timeStr = d.generated_at ? `生成于 ${d.generated_at}` : ''
+
+  const statusCfg = {
+    todo:        { icon: '○', color: '#6b7280', bg: 'transparent',  label: '待执行' },
+    running:     { icon: '▶', color: '#a78bfa', bg: '#1e153344',    label: '执行中' },
+    done:        { icon: '✓', color: '#34d399', bg: 'transparent',  label: '已完成' },
+    interrupted: { icon: '✗', color: '#f87171', bg: '#7f1d1d22',    label: '已中断' },
+  }
+
+  const listHtml = states.length > 0
+    ? states.map((s, i) => {
+        const cfg = statusCfg[s.status] || statusCfg.todo
+        return `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;
+                  border-bottom:1px solid #1e2235;background:${cfg.bg};border-radius:4px;margin-bottom:2px">
+          <span style="font-size:14px;color:${cfg.color};flex-shrink:0;margin-top:1px">${cfg.icon}</span>
+          <span style="flex:1;color:${cfg.color==='#6b7280'?'#9ca3af':cfg.color};font-size:13px;line-height:1.5">${esc(s.text)}</span>
+          <span style="font-size:10px;color:${cfg.color};background:#ffffff11;padding:1px 6px;border-radius:8px;flex-shrink:0">${cfg.label}</span>
+        </div>`
+      }).join('')
+    : `<div style="color:#4b5563;font-size:13px;padding:20px 0">尚无记录，等待 Agent 生成第一批 Plan</div>`
+
+  document.getElementById('content-body').innerHTML = `
+    <div style="max-width:640px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:14px">${esc(timeStr)}</div>
+      <div>${listHtml}</div>
+
+      <div style="margin-top:24px;border-top:1px solid #1e2235;padding-top:16px">
+        <div style="font-size:11px;color:#6b7280;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em">
+          编辑原始内容
+        </div>
+        <div style="font-size:11px;color:#4b5563;margin-bottom:8px">
+          状态标记：<code style="color:#a78bfa">- [ ]</code> 待执行 &nbsp;
+          <code style="color:#f87171">- [interrupted]</code> 已中断 &nbsp;
+          <code style="color:#34d399">- [x]</code> 已完成 &nbsp;
+          <code style="color:#6b7280">- [running]</code> 执行中
+        </div>
+        <textarea id="plans-ta" style="width:100%;min-height:180px;background:#1a1d27;border:1px solid #2d3148;
+          border-radius:8px;padding:12px;color:#c4b5fd;font-size:13px;line-height:1.7;
+          resize:vertical;outline:none;font-family:monospace"
+          spellcheck="false">${esc(d.raw)}</textarea>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button class="save-btn" onclick="savePlans()">保存</button>
+          <button class="save-btn" onclick="showPlans()" style="background:#1e2235">刷新</button>
+          <span class="save-msg" id="plans-save-msg"></span>
+        </div>
+      </div>
+    </div>`
+}
+async function savePlans() {
+  const content = document.getElementById('plans-ta').value
+  const resp = await fetch('/memory/plans', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content}),
+  })
+  const d = await resp.json()
+  const msg = document.getElementById('plans-save-msg')
+  if (d.ok) {
+    msg.textContent = '✓ 已保存'
+    setTimeout(() => { msg.textContent = ''; showPlans() }, 1200)
+  } else {
+    msg.textContent = '保存失败'
+    msg.style.color = '#f87171'
+  }
 }
 
 // ── Purpose ──────────────────────────────────────────────────────────────────
@@ -1345,7 +1589,34 @@ async function viewFile(path, name) {
   const detail = document.getElementById('fv-detail')
   detail.innerHTML = '<div class="empty-hint">加载中…</div>'
   const d = await fetch(`/memory/file?path=${encodeURIComponent(path)}`).then(r=>r.json())
-  detail.innerHTML = renderFileContent(d.content)
+  detail.innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <button onclick="deleteFile('${esc(path)}','${esc(name)}')"
+        style="padding:5px 14px;background:#7f1d1d44;color:#f87171;border:1px solid #7f1d1d;
+               border-radius:6px;font-size:12px;cursor:pointer">
+        删除此记忆
+      </button>
+    </div>
+    ${renderFileContent(d.content)}`
+}
+
+async function deleteFile(path, name) {
+  if (!confirm(`确认删除 ${name}？\n同时将从 Memory.md 索引中移除。`)) return
+  const resp = await fetch(`/memory/file?path=${encodeURIComponent(path)}`, {method: 'DELETE'})
+  if (!resp.ok) {
+    const d = await resp.json().catch(()=>({}))
+    alert('删除失败：' + (d.detail || resp.status))
+    return
+  }
+  // 移除卡片，清空详情
+  const card = document.getElementById('card-' + name)
+  if (card) card.remove()
+  document.getElementById('fv-detail').innerHTML = '<div class="empty-hint">已删除。</div>'
+  // 更新侧边栏计数
+  const type = path.startsWith('events/') ? 'events' : 'recognitions'
+  const cntEl = document.getElementById('cnt-' + type)
+  if (cntEl) cntEl.textContent = Math.max(0, parseInt(cntEl.textContent||'0') - 1)
+  _selectedFile = null
 }
 
 async function openFileByPath(path) {
@@ -1415,4 +1686,19 @@ function esc(s) {
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AGENT_v2 UI server")
+    parser.add_argument("--profile", required=True, help="profile 文件夹路径，例如 profiles/xiao_ming")
+    parser.add_argument("--port", type=int, default=8001, help="监听端口（默认 8001）")
+    args = parser.parse_args()
+
+    profile_dir = Path(args.profile)
+    if not profile_dir.exists():
+        print(f"错误：profile 文件夹不存在：{profile_dir}")
+        raise SystemExit(1)
+
+    store.init(profile_dir)
+    _cfg.update(load_config(profile_dir))
+
+    uvicorn.run(app, host="0.0.0.0", port=args.port)

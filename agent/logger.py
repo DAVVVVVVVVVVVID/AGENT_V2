@@ -33,7 +33,7 @@ class AgentLogger:
         self._f.write("=" * 80 + "\n")
         self._f.write(f"AGENT LOG  |  {now}\n")
         self._f.write(f"Task  : {task}\n")
-        self._f.write(f"Agent : {cfg['name']} ({cfg['entity_id']})\n")
+        self._f.write(f"Agent : {cfg['name']} ({cfg.get('entity_id', '-')})\n")
         self._f.write(f"Model : {cfg['model']}\n")
         self._f.write(f"Vision: {cfg['vision_size']}×{cfg['vision_size']}\n")
         self._f.write("=" * 80 + "\n\n")

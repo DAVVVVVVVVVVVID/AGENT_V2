@@ -5,6 +5,7 @@ Base URL is configurable; defaults to http://localhost:8000.
 
 from __future__ import annotations
 
+import threading
 import httpx
 
 
@@ -40,6 +41,24 @@ class SandboxClient:
     def leave_player(self, player_id: str) -> None:
         """DELETE /player/{player_id}/leave — removes the player."""
         self._delete(f"/player/{player_id}/leave")
+
+    def start_heartbeat(self, player_id: str, interval: float = 3.0) -> threading.Event:
+        """
+        启动后台心跳线程，每隔 interval 秒调用 GET /player/{id}。
+        返回 stop_event，调用 stop_event.set() 停止心跳。
+        """
+        stop_event = threading.Event()
+
+        def _beat() -> None:
+            while not stop_event.wait(interval):
+                try:
+                    self.get_player(player_id)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_beat, daemon=True)
+        t.start()
+        return stop_event
 
     # ── query endpoints ────────────────────────────────────────────────────
 

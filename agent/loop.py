@@ -83,6 +83,7 @@ def _run_plan(
     emit: Callable,
     pause_flag: threading.Event | None,
     stop_flag: threading.Event | None,
+    interrupt_flag: threading.Event | None,
     shared_state: dict | None,
 ) -> str:
     """
@@ -98,6 +99,11 @@ def _run_plan(
     while True:
         if stop_flag is not None and stop_flag.is_set():
             return ""
+
+        if interrupt_flag is not None and interrupt_flag.is_set():
+            interrupt_flag.clear()
+            emit({"type": "plan_interrupted", "plan": plan})
+            return "__interrupted__"
 
         round_num += 1
         emit({"type": "round_start", "round": round_num})
@@ -184,6 +190,8 @@ def run(
     emit: Callable[[dict], None] | None = None,
     pause_flag: threading.Event | None = None,
     stop_flag: threading.Event | None = None,
+    interrupt_flag: threading.Event | None = None,
+    use_file_plans_flag: threading.Event | None = None,
     shared_state: dict | None = None,
 ) -> None:
     """
@@ -211,6 +219,60 @@ def run(
             return
 
         emit({"type": "outer_start"})
+
+        # ── 检查是否使用文件中的 Plan（跳过规划）────────────────────────────
+        if use_file_plans_flag is not None and use_file_plans_flag.is_set():
+            use_file_plans_flag.clear()
+            try:
+                states = store.read_plan_states()
+                plan_batch = [s["text"] for s in states if s["status"] == "todo"]
+            except Exception as e:
+                emit({"type": "warning", "content": f"读取文件 Plan 错误：{e}"})
+                plan_batch = []
+            if not plan_batch:
+                emit({"type": "warning", "content": "文件中无待执行 Plan，重新规划。"})
+                # 降级为正常规划
+                use_file_plans_flag = None  # 不再重试，走下面的正常路径
+            else:
+                emit({"type": "plan_batch_from_file", "plans": plan_batch})
+                if shared_state is not None:
+                    shared_state["plan_batch"] = plan_batch
+                # 不调用 save_plan_batch，保留文件原有状态
+                for idx, plan in enumerate(plan_batch, 1):
+                    if stop_flag is not None and stop_flag.is_set():
+                        return
+                    # 找到该 plan 在文件中的真实 index（跳过已 done/interrupted 的）
+                    all_states = store.read_plan_states()
+                    file_idx = next(
+                        (i for i, s in enumerate(all_states) if s["text"] == plan and s["status"] == "todo"),
+                        None,
+                    )
+                    emit({"type": "plan_start", "plan": plan, "plan_index": idx, "total": len(plan_batch)})
+                    if shared_state is not None:
+                        shared_state["current_plan"] = plan
+                        shared_state["plan_index"]   = idx
+                    if file_idx is not None:
+                        try:
+                            store.set_plan_status(file_idx, "running")
+                        except Exception:
+                            pass
+                    reply = _run_plan(
+                        plan=plan, perceiver=perceiver, retriever=retriever,
+                        thinker=thinker, executor=executor, llm=llm, model=model,
+                        emit=emit, pause_flag=pause_flag, stop_flag=stop_flag,
+                        interrupt_flag=interrupt_flag, shared_state=shared_state,
+                    )
+                    if file_idx is not None:
+                        try:
+                            if reply == "__interrupted__":
+                                store.set_plan_status(file_idx, "interrupted")
+                            else:
+                                store.set_plan_status(file_idx, "done")
+                        except Exception:
+                            pass
+                    if reply == "__interrupted__":
+                        break
+                continue
 
         # ── Outer Perceive ────────────────────────────────────────────────────
         try:
@@ -240,6 +302,10 @@ def run(
         emit({"type": "plan_batch", "plans": plan_batch})
         if shared_state is not None:
             shared_state["plan_batch"] = plan_batch
+        try:
+            store.save_plan_batch(plan_batch)
+        except Exception:
+            pass
 
         # ── Inner loop: execute each Plan ────────────────────────────────────
         for idx, plan in enumerate(plan_batch, 1):
@@ -251,16 +317,31 @@ def run(
                 shared_state["current_plan"] = plan
                 shared_state["plan_index"]   = idx
 
-            _run_plan(
-                plan       = plan,
-                perceiver  = perceiver,
-                retriever  = retriever,
-                thinker    = thinker,
-                executor   = executor,
-                llm        = llm,
-                model      = model,
-                emit       = emit,
-                pause_flag = pause_flag,
-                stop_flag  = stop_flag,
-                shared_state = shared_state,
+            try:
+                store.set_plan_status(idx - 1, "running")
+            except Exception:
+                pass
+
+            reply = _run_plan(
+                plan           = plan,
+                perceiver      = perceiver,
+                retriever      = retriever,
+                thinker        = thinker,
+                executor       = executor,
+                llm            = llm,
+                model          = model,
+                emit           = emit,
+                pause_flag     = pause_flag,
+                stop_flag      = stop_flag,
+                interrupt_flag = interrupt_flag,
+                shared_state   = shared_state,
             )
+
+            try:
+                if reply == "__interrupted__":
+                    store.set_plan_status(idx - 1, "interrupted")
+                    break
+                else:
+                    store.set_plan_status(idx - 1, "done")
+            except Exception:
+                pass

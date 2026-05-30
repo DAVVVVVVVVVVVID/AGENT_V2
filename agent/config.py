@@ -1,5 +1,18 @@
-# Agent configuration
+from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
+
+
+def load_config(profile_dir: str | Path) -> dict:
+    """从 profile 文件夹中读取 config.yaml 并返回配置字典。"""
+    path = Path(profile_dir) / "config.yaml"
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+# 兜底默认值（不指定 profile 时使用）
 AGENT_CONFIG = {
     "name":      "小明",
     "entity_id": "player_01",

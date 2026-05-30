@@ -193,6 +193,19 @@ class Execute:
             return _ok({"objectId": r.get("objectId")})
         return _fail("当前没有正在使用的对象")
 
+    # ── Recognition ──────────────────────────────────────────────────────────
+
+    def _record_recognition(self, args: dict) -> dict:
+        from agent.memory import store
+        path = store.create_recognition(
+            summary    = args["summary"],
+            content    = args["content"],
+            importance = args["importance"],
+            keywords   = args.get("keywords", []),
+            trigger    = args.get("trigger", ""),
+        )
+        return _ok({"saved": path.name, "summary": args["summary"]})
+
     # ── Finish ────────────────────────────────────────────────────────────────
 
     def _finish(self, args: dict) -> dict:
@@ -231,5 +244,6 @@ _HANDLERS: dict[str, callable] = {
     "use_object":          Execute._use_object,
     "observe_object":      Execute._observe_object,
     "leave_object":        Execute._leave_object,
+    "record_recognition":  Execute._record_recognition,
     "finish":              Execute._finish,
 }
