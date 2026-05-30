@@ -136,12 +136,30 @@ def create_event(
     why: str,
     importance: int,
     keywords: list[str],
+    raw_actions: list[dict] | None = None,
 ) -> Path:
     _require_init()
     file_id  = _next_id(_EVENTS_DIR, "event")  # type: ignore[arg-type]
     filepath = _EVENTS_DIR / f"{file_id}.md"  # type: ignore[operator]
     now      = _now_iso()
     kw_str   = ", ".join(keywords)
+
+    raw_section = ""
+    if raw_actions:
+        lines = []
+        for a in raw_actions:
+            name   = a.get("name", "")
+            args   = a.get("arguments", {})
+            status = a.get("status", "")
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            if status == "success":
+                result = a.get("result", "")
+                lines.append(f"✓ {name}({args_str}) → {result}")
+            elif status == "failed":
+                reason = a.get("reason", "")
+                lines.append(f"✗ {name}({args_str}) → {reason}")
+        if lines:
+            raw_section = "\n## Raw Actions\n" + "\n".join(lines) + "\n"
 
     filepath.write_text(
         f"---\n"
@@ -153,7 +171,8 @@ def create_event(
         f"---\n\n"
         f"## What\n{what}\n\n"
         f"## How\n{how}\n\n"
-        f"## Why\n{why}\n",
+        f"## Why\n{why}\n"
+        f"{raw_section}",
         encoding="utf-8",
     )
     update_memory_index(filepath, summary, now, importance)

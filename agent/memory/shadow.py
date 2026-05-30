@@ -106,13 +106,20 @@ def _run(history: list[dict], llm, model: str) -> None:
         tc   = resp.choices[0].message.tool_calls[0]
         args = json.loads(tc.function.arguments)
 
+        raw_actions = [
+            a for h in history
+            for a in h.get("action_sequence", [])
+            if a.get("status") in ("success", "failed")
+        ]
+
         fp = store.create_event(
-            summary    = args["summary"],
-            what       = args["what"],
-            how        = args["how"],
-            why        = args["why"],
-            importance = int(args["importance"]),
-            keywords   = args["keywords"],
+            summary     = args["summary"],
+            what        = args["what"],
+            how         = args["how"],
+            why         = args["why"],
+            importance  = int(args["importance"]),
+            keywords    = args["keywords"],
+            raw_actions = raw_actions,
         )
         logger.info("shadow agent: event memory written → %s", fp.name)
 
