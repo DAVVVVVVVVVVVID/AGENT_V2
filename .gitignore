@@ -16,6 +16,9 @@ memory/recognitions/*.md
 memory/Memory.md
 memory/keywords.md
 
+# Agent profiles (runtime data, not source code)
+profiles/
+
 # IDE
 .idea/
 .vscode/
