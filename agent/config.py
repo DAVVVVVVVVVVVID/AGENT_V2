@@ -11,6 +11,10 @@ _DREAM_DEFAULTS = {
     "time_of_day": None,
 }
 
+_LOOP_DEFAULTS = {
+    "loop_max_rounds": 30,
+}
+
 
 def load_config(profile_dir: str | Path) -> dict:
     """从 profile 文件夹中读取 config.yaml 并返回配置字典。"""
@@ -21,6 +25,11 @@ def load_config(profile_dir: str | Path) -> dict:
     # 补全 dream 默认值
     dream_raw = cfg.get("dream") or {}
     cfg["dream"] = {**_DREAM_DEFAULTS, **dream_raw}
+
+    # 补全 loop 默认值
+    for k, v in _LOOP_DEFAULTS.items():
+        cfg.setdefault(k, v)
+
     return cfg
 
 

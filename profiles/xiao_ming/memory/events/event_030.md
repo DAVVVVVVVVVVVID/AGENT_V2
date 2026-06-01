@@ -1,16 +1,24 @@
 ---
-Description: 卧室冰箱功能验证表明除移动速度增益外无其他可交互属性
-Time: 2026-05-30T12:19:31+00:00
-Keywords: [冰箱, 功能验证, 移动增益, 交互流程, 卧室场景]
+Description: 小明在卧室中成功使用床完成交互
+Time: 2026-05-30T16:15:09+00:00
+Keywords: [床交互, 位置确认, 成功使用, 任务完成]
 Type: event
-Importance: 4
+Importance: 6
 ---
 
 ## What
-用户执行Plan'检查卧室冰箱的其他功能交互'，通过定位冰箱、移动至交互位置并验证其功能，确认当前冰箱仅提供移动速度增益
+小明在坐标(2,3)朝左状态下，确认自身位于床对象(1,3)的相邻可行走格子且朝向正确，直接执行use_object后离开对象并完成任务
 
 ## How
-{'description': '关键步骤：1.调用get_object_position定位冰箱坐标 2.使用move_to_tile移动至(1,8) 3.转向left面朝冰箱 4.调用use_object触发交互 5.调用finish确认无新功能', 'type': 'string'}
+1. 分析坐标和朝向确认无需移动
+2. 调用use_object使用床对象
+3. 调用leave_object结束交互
+4. 通过finish完成任务流程
 
 ## Why
-基于之前event_013/even_023的交互经验，需验证冰箱是否存在未发现的附加功能
+小明需要与床对象交互以完成休息相关的任务目标
+
+## Raw Actions
+✓ use_object() → {'objectId': 'bed_1779366945721', 'stateLabel': '小明 正在使用', 'message': '困意袭来，在床上渐渐睡去'}
+✓ leave_object() → {'objectId': 'bed_1779366945721'}
+✓ finish(reply='成功与卧室中的床对象交互并完成任务') → {'reply': '成功与卧室中的床对象交互并完成任务'}

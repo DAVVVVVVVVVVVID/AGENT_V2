@@ -1,16 +1,23 @@
 ---
-Description: 完成工作区域书桌交互并通过跨区域移动验证，结束探索任务
-Time: 2026-05-30T12:44:07+00:00
-Keywords: [探索任务结束, 工作区域, 跨区域移动验证, 书桌交互, Finish指令]
+Description: 标准化卧室冰箱交互流程并完成状态闭环
+Time: 2026-05-30T18:53:41+00:00
+Keywords: [冰箱交互, 流程标准化, 状态闭环, 异常处理, 方向校准]
 Type: event
-Importance: 8
+Importance: 7
 ---
 
 ## What
-用户通过跨区域移动验证后，完成工作区域内的书桌交互操作，最终调用finish指令结束探索任务
+通过三次尝试修正交互流程，最终在use_object成功后直接finish完成流程，避免leave_object错误
 
 ## How
-在确认位置(10,1)处于工作区域且状态为idle后，检查周边无障碍物并直接调用finish指令。基于记忆检索中相同情境的完成模式（event_032/event_040），判定无需进一步交互操作
+1. 移动到(0,7)并调整向下方向 2. 两次use_object尝试后确认交互成功 3. 检测到leave_object报错后改用finish结束流程 4. 根据event_042案例确认系统可自动处理离开状态
 
 ## Why
-根据已验证的移动路径和对象交互状态，任务目标中的跨区域验证和核心对象操作已完成，符合结束条件。历史案例显示该场景下使用finish指令是标准操作流程
+建立标准化交互流程确保操作一致性，通过异常处理保证状态闭环
+
+## Raw Actions
+✓ use_object() → {'objectId': 'fridge_1779367415680', 'stateLabel': None, 'message': '好吃！'}
+✗ leave_object() → 当前没有正在使用的对象
+✓ use_object() → {'objectId': 'fridge_1779367415680', 'stateLabel': None, 'message': '好吃！'}
+✗ leave_object() → 当前没有正在使用的对象
+✓ finish(reply='卧室冰箱交互流程标准化完成，use_object成功后系统自动处理离开状态') → {'reply': '卧室冰箱交互流程标准化完成，use_object成功后系统自动处理离开状态'}

@@ -1,16 +1,20 @@
 ---
-Description: 小明尝试解除书桌使用状态以恢复行动自由，但7次leave_object调用失败最终直接调用finish结束任务
-Time: 2026-05-30T11:53:12+00:00
-Keywords: [书桌使用状态, leave_object异常, 移动自由, 状态同步问题, 交互流程验证]
+Description: 用户结束办公区desk交互任务
+Time: 2026-05-30T15:52:12+00:00
+Keywords: [任务结束, leave_object, finish, 办公区, 交互终止]
 Type: event
 Importance: 6
 ---
 
 ## What
-计划要求解除书桌使用状态，实际通过10轮交互（含7次失败的leave_object尝试）后直接调用finish确认状态
+用户结束对办公区desk的交互任务，从using状态恢复至idle并完成任务
 
 ## How
-执行了7次leave_object调用（全部失败提示'当前无正在使用的对象'），3次调用finish。最后一次直接通过finish确认'idle'状态已满足移动自由条件。障碍：系统状态同步异常导致leave_object调用持续失败
+调用leave_object工具退出desk对象交互，随后调用finish工具结束任务。关键步骤包括状态检查和连续工具调用，无需额外移动或转向操作
 
 ## Why
-根据历史记忆小明曾成功使用leave_object解除移动限制，但当前workplace区域书桌对象存在状态同步异常，需验证实际交互效果
+根据环境交互规则，使用后的对象需主动释放并结束任务流程
+
+## Raw Actions
+✓ leave_object() → {'objectId': 'desk_1779367828152'}
+✓ finish(reply='成功结束办公区 desk 交互任务') → {'reply': '成功结束办公区 desk 交互任务'}

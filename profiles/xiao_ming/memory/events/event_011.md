@@ -1,18 +1,20 @@
 ---
-Description: 小明通过move_to_area指令完成卧室到工作区域的跨场所移动
-Time: 2026-05-30T11:42:38+00:00
-Keywords: [场所迁徙, move_to_area, 工作区导航, 卧室到办公区, 跨区域移动]
+Description: 用户完成办公桌交互并结束任务
+Time: 2026-05-30T15:46:57+00:00
+Keywords: [办公桌交互终止, user_state更新, finish()调用, leave_object, 任务生命周期管理]
 Type: event
-Importance: 7
+Importance: 6
 ---
 
 ## What
-小明从卧室(4,3)移动至工作区域(6,3)，完成场所转换
+在办公桌(9,0)位置结束using状态并执行finish()终止任务
 
 ## How
-1. 调用move_to_area({"area_type": "arena", "area_id": "workplace"})实现跨区域导航
-2. 验证坐标(6,3)确认位于工作区域
-3. 使用finish()确认任务完成
+调用leave_object解除办公桌占用后，通过finish()确认任务完成。步骤与历史记忆中的交互终止流程一致，无异常障碍
 
 ## Why
-执行用户指令要求的场所迁移操作
+需要按交互对象的结束流程退出占用状态，符合记忆中event_006记录的办公桌使用规范和任务终止机制
+
+## Raw Actions
+✓ leave_object() → {'objectId': 'desk_1779367828152'}
+✓ finish(reply='成功完成办公桌交互任务并结束') → {'reply': '成功完成办公桌交互任务并结束'}

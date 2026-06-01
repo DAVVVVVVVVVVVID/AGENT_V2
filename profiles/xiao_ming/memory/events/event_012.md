@@ -1,16 +1,27 @@
 ---
-Description: 小明成功找到并使用工作区域的书桌完成交互
-Time: 2026-05-30T11:44:21+00:00
-Keywords: [工作区书桌, 对象交互, 移动路径, 视角校正, 状态解除]
+Description: 小明成功通过跨区域移动和精准交互完成卧室床对象验证
+Time: 2026-05-30T15:48:45+00:00
+Keywords: [卧室区域, 床对象, 跨区移动, 交互验证, 流程闭环]
 Type: event
-Importance: 7
+Importance: 9
 ---
 
 ## What
-在工作区域定位目标书桌后，通过移动-转向-交互-结束使用的完整流程完成对象操作任务
+目标为卧室区域床对象交互验证，初始因移动至错误位置导致失败，后修正路径并完成交互
 
 ## How
-1. 通过get_object_position获取桌坐标(10,0)；2. 移动到(9,0)相邻格触发视角变化；3. 调整朝向至正对书桌后成功use_object；4. 使用完毕后调用leave_object解除绑定
+1.通过move_to_area切换至卧室区域 2.首次因误选(0,7)导致use_object失败 3.二次移动至床附近坐标(2,3) 4.调整方向后use_object成功 5.完成流程闭环
 
 ## Why
-工作场景中书桌交互是基础操作需求，需符合空间定位→移动→对准→交互的标准流程规范
+验证游戏场景中跨区域交互流程可行性及对象位置定位机制
+
+## Raw Actions
+✓ move_to_area(area_type='arena', area_id='bedroom') → {'position': {'x': 4, 'y': 3}, 'facing': 'left'}
+✓ get_object_position(object_id='bed_1779366945721') → {'position': {'x': 0, 'y': 3}, 'tiles': [{'x': 0, 'y': 3}, {'x': 1, 'y': 3}, {'x': 0, 'y': 4}, {'x': 1, 'y': 4}, {'x': 0, 'y': 5}, {'x': 1, 'y': 5}], 'adjacent_walkable': [{'x': 2, 'y': 3}, {'x': 2, 'y': 4}, {'x': 0, 'y': 6}, {'x': 1, 'y': 6}, {'x': 2, 'y': 5}]}
+✓ move_to_tile(x=0, y=7) → {'position': {'x': 0, 'y': 7}, 'facing': 'down'}
+✓ turn(direction='up') → {'facing': 'up'}
+✗ use_object() → 正前方没有可使用的对象
+✓ move_to_tile(x=2, y=3) → {'position': {'x': 2, 'y': 3}, 'facing': 'up'}
+✓ turn(direction='left') → {'facing': 'left'}
+✓ use_object() → {'objectId': 'bed_1779366945721', 'stateLabel': '小明 正在使用', 'message': '困意袭来，在床上渐渐睡去'}
+✓ finish(reply='成功通过跨区域移动和精准交互验证卧室床对象流程闭环') → {'reply': '成功通过跨区域移动和精准交互验证卧室床对象流程闭环'}

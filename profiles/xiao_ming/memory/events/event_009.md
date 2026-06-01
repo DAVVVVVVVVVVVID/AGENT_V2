@@ -1,19 +1,24 @@
 ---
-Description: 小明成功从工作区域移动至卧室区域
-Time: 2026-05-30T11:40:14+00:00
-Keywords: [跨区域移动, move_to_area, 卧室区域, 位置转移, 任务完成]
+Description: 用户成功从浴室前往卧室区域并检查冰箱状态
+Time: 2026-05-30T15:45:25+00:00
+Keywords: [区域移动, 冰箱检查, 坐标定位, 物品交互]
 Type: event
 Importance: 5
 ---
 
 ## What
-执行跨区域移动任务，将小明从工作区域(12,0)位置转移到卧室区域(4,3)位置
+目标为检查卧室区域冰箱状态，实际执行了跨区域移动、定位冰箱、调整位置方向并完成检查
 
 ## How
-1. 分析当前区域ID和目标区域ID
-2. 调用move_to_area函数指定arena类型和bedroom区域ID
-3. 系统自动计算目标位置(4,3)
-4. 执行完移动后调用finish确认任务完成
+{'key_steps': ['move_to_area切换区域', 'get_object_position定位冰箱坐标', 'move_to_tile移动到相邻格子', 'turn调整方向', 'use_object检查'], 'obstacles': '需要跨区域协作与坐标定位'}
 
 ## Why
-用户需求要求将角色从原工作区域转移到卧室区域
+确认卧室区域冰箱内物品状态是否正常
+
+## Raw Actions
+✓ move_to_area(area_type='arena', area_id='bedroom') → {'position': {'x': 2, 'y': 3}, 'facing': 'down'}
+✓ get_object_position(object_id='fridge_1779367415680') → {'position': {'x': 0, 'y': 8}, 'tiles': [{'x': 0, 'y': 8}], 'adjacent_walkable': [{'x': 0, 'y': 7}, {'x': 1, 'y': 8}]}
+✓ move_to_tile(y=7, x=0) → {'position': {'x': 0, 'y': 7}, 'facing': 'down'}
+✓ turn(direction='down') → {'facing': 'down'}
+✓ use_object() → {'objectId': 'fridge_1779367415680', 'stateLabel': None, 'message': '好吃！'}
+✓ finish(reply='已成功前往卧室区域并检查冰箱状态') → {'reply': '已成功前往卧室区域并检查冰箱状态'}

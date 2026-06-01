@@ -225,11 +225,58 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "find_nearby_players",
+            "description": (
+                "查询当前所在 Arena 内可以发起对话的其他 Player 列表。"
+                "返回 entity_id、名字和所在 arena_id。"
+                "在主动发起对话前，先调用此工具确认目标是否在附近。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_chat_request",
+            "description": (
+                "向一个或多个 Player 发起对话邀请。"
+                "对方会收到请求通知并决定是否接受。"
+                "greeting 是你的开场白，应该自然且符合当前情境。"
+                "调用后可继续执行其他行动；对方是否接受由系统在下一轮处理。"
+                "注意：主动发起对话后通常应立即调用 finish() 结束当前 Plan，"
+                "以便系统切换到对话等待状态。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_entity_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要邀请对话的 entity_id 列表（通常一个）",
+                    },
+                    "greeting": {
+                        "type": "string",
+                        "description": "开场白，对方将看到这句话",
+                    },
+                },
+                "required": ["to_entity_ids", "greeting"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": (
-                "宣告当前 Plan 已完成，必须且只能作为行动序列中的最后一个行动。"
-                "只有在 Plan 目标真正达成后才能调用，不能提前或中途调用。"
+                "宣告当前 Plan 结束，必须且只能作为行动序列中的最后一个行动。"
                 "调用后本轮 Plan 结束，系统将进入下一个 Plan。"
+                "允许在以下情况调用：① Plan 目标已达成；"
+                "② 多次尝试后确认 Plan 无法继续推进（如反复失败、环境不支持该操作）。"
+                "第②种情况下在 reply 中说明原因即可，不必强求完美执行所有预期步骤。"
             ),
             "parameters": {
                 "type": "object",
@@ -388,7 +435,9 @@ def _build_system_prompt(
         f"{memory_section}\n\n"
         "根据当前 Plan、感知信息和历史记忆，规划并输出本轮的行动序列。\n"
         "可以一次输出多个原子行动（tool call），按执行顺序排列。\n"
-        "若当前 Plan 已完成，最后一个行动必须是 finish()。\n"
+        "若当前 Plan 已完成或已无法继续推进，最后一个行动必须是 finish()。\n"
+        "判断「无法推进」的信号：相同动作连续失败 3 次及以上、"
+        "或目标效果已实现但流程无法闭合——此时应直接 finish() 并在 reply 中说明，不要继续重复尝试。\n"
         "所有行动均通过 tool call 输出，不要输出纯文字回复。"
     )
 

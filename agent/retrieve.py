@@ -40,6 +40,13 @@ _SYSTEM_PROMPT = (
     "优先选择索引中已存在的关键词；索引中没有合适词时，可提出新关键词。"
 )
 
+_CHAT_SYSTEM_PROMPT = (
+    "你是一个记忆检索助手。"
+    "根据对话内容，从提供的关键词列表中选择 3–5 个最相关的检索关键词。"
+    "优先关注：对话中提到的人物、地点、事件、话题。"
+    "优先从提供的关键词列表中选择；列表中没有合适词时，可提出新关键词。"
+)
+
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
 
 _INDEX_RE = re.compile(r"- \[.+?\]\((.+?)\) — .+ \| (.+?) \| imp=(\d+)")
@@ -80,7 +87,7 @@ class Retrieve:
         self._llm   = llm
         self._model = model
 
-    def retrieve(self, task_or_plan: str, perceive_summary: str) -> list[str]:
+    def retrieve(self, task_or_plan: str, perceive_summary: str, emit=None, stage: str = "initial") -> list[str]:
         """
         两步检索，返回 top-5 记忆文件正文列表。
         无记忆或检索无命中时返回空列表。
@@ -90,7 +97,7 @@ class Retrieve:
             return []
 
         # ── Step 1：LLM 选关键词 ──────────────────────────────────────────────
-        keywords = self._select_keywords(task_or_plan, perceive_summary, memory_index)
+        keywords, kw_prompt, kw_raw = self._select_keywords(task_or_plan, perceive_summary, memory_index)
         if not keywords:
             return []
 
@@ -117,14 +124,118 @@ class Retrieve:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top5_paths = [fp for _, fp in scored[:5]]
-        return store.load_files(top5_paths)
+        results = store.load_files(top5_paths)
+
+        if emit is not None:
+            emit({
+                "type": "chat_retrieve", "stage": stage,
+                "prompt": kw_prompt, "raw": kw_raw,
+                "keywords": keywords, "hits": top5_paths,
+            })
+        return results
+
+    def get_recent_events(self, n: int = 2, emit=None) -> list[str]:
+        """直接取最新 n 条 event 记忆，无 LLM。"""
+        memory_index = store.load_memory_index()
+        meta = _parse_memory_index(memory_index)
+        events = [
+            (time_str, fp)
+            for fp, (_, time_str) in meta.items()
+            if fp.startswith("events/")
+        ]
+        events.sort(key=lambda x: x[0], reverse=True)
+        top_paths = [fp for _, fp in events[:n]]
+        results = store.load_files(top_paths)
+        if emit is not None:
+            emit({
+                "type": "chat_retrieve", "stage": "initial_behavior",
+                "prompt": f"取最新 {n} 条 event 记忆",
+                "raw": "", "keywords": [], "hits": top_paths,
+            })
+        return results
+
+    def get_partner_memories(self, partner_name: str, n: int = 3, emit=None) -> list[str]:
+        """用对方名字在 keywords 索引中查匹配文件，按 importance 取前 n 条，无 LLM。"""
+        kw_index = store.get_keywords_index()
+        name_lower = partner_name.lower()
+        hit_files: set[str] = set()
+        for kw, files in kw_index.items():
+            if name_lower in kw.lower():
+                hit_files.update(files)
+        if not hit_files:
+            if emit is not None:
+                emit({
+                    "type": "chat_retrieve", "stage": "initial_partner",
+                    "prompt": f'按名称「{partner_name}」检索',
+                    "raw": "", "keywords": [partner_name], "hits": [],
+                })
+            return []
+        memory_index = store.load_memory_index()
+        meta = _parse_memory_index(memory_index)
+        scored = [
+            (meta[fp][0] if fp in meta else 0.0, fp)
+            for fp in hit_files
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_paths = [fp for _, fp in scored[:n]]
+        results = store.load_files(top_paths)
+        if emit is not None:
+            emit({
+                "type": "chat_retrieve", "stage": "initial_partner",
+                "prompt": f'按名称「{partner_name}」检索',
+                "raw": "", "keywords": [partner_name], "hits": top_paths,
+            })
+        return results
+
+    def retrieve_for_chat(self, recent_messages_text: str, emit=None) -> list[str]:
+        """
+        Chat session 动态检索：基于最近对话内容选关键词，返回 top-5 记忆。
+        """
+        kw_index = store.get_keywords_index()
+        if not kw_index:
+            return []
+
+        keywords, kw_prompt, kw_raw = self._select_keywords_chat(recent_messages_text)
+        if not keywords:
+            return []
+
+        memory_index = store.load_memory_index()
+        meta         = _parse_memory_index(memory_index)
+        hit_count: dict[str, int] = {}
+        for kw in keywords:
+            for fp in kw_index.get(kw, []):
+                hit_count[fp] = hit_count.get(fp, 0) + 1
+
+        if not hit_count:
+            if emit is not None:
+                emit({"type": "chat_retrieve", "stage": "dynamic",
+                      "prompt": kw_prompt, "raw": kw_raw,
+                      "keywords": keywords, "hits": []})
+            return []
+
+        scored = []
+        for fp, count in hit_count.items():
+            base_imp, time_str = meta[fp] if fp in meta else (0.0, "")
+            score = _compute_score(base_imp, time_str, count) if fp in meta else count * 0.5
+            scored.append((score, fp))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top5_paths = [fp for _, fp in scored[:5]]
+        results = store.load_files(top5_paths)
+
+        if emit is not None:
+            emit({"type": "chat_retrieve", "stage": "dynamic",
+                  "prompt": kw_prompt, "raw": kw_raw,
+                  "keywords": keywords, "hits": top5_paths})
+        return results
 
     def _select_keywords(
         self,
         task_or_plan: str,
         perceive_summary: str,
         memory_index: str,
-    ) -> list[str]:
+    ) -> tuple[list[str], str, str]:
+        """返回 (keywords, user_msg, raw_arguments_str)。"""
         user_msg = (
             f"【当前任务/计划】\n{task_or_plan}\n\n"
             f"【当前感知摘要】\n{perceive_summary}\n\n"
@@ -141,6 +252,36 @@ class Retrieve:
                 tool_choice={"type": "function", "function": {"name": "select_keywords"}},
             )
             tc = resp.choices[0].message.tool_calls[0]
-            return json.loads(tc.function.arguments).get("keywords", [])
+            raw = tc.function.arguments
+            keywords = json.loads(raw).get("keywords", [])
+            return keywords, user_msg, raw
         except Exception:
-            return []
+            return [], user_msg, ""
+
+    def _select_keywords_chat(
+        self,
+        recent_messages_text: str,
+    ) -> tuple[list[str], str, str]:
+        """返回 (keywords, user_msg, raw_arguments_str)。"""
+        top_kws = store.get_top_keywords(50)
+        kw_list = "、".join(top_kws) if top_kws else "（暂无关键词）"
+        user_msg = (
+            f"【最近对话记录】\n{recent_messages_text}\n\n"
+            f"【可用关键词（共{len(top_kws)}个）】\n{kw_list}"
+        )
+        try:
+            resp = self._llm.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _CHAT_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                tools=[_KW_TOOL],
+                tool_choice={"type": "function", "function": {"name": "select_keywords"}},
+            )
+            tc = resp.choices[0].message.tool_calls[0]
+            raw = tc.function.arguments
+            keywords = json.loads(raw).get("keywords", [])
+            return keywords, user_msg, raw
+        except Exception:
+            return [], user_msg, ""

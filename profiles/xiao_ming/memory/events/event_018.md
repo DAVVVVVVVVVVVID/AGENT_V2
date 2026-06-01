@@ -1,19 +1,20 @@
 ---
-Description: 确认卧室区域交互任务完成
-Time: 2026-05-30T11:55:42+00:00
-Keywords: [卧室, 交互确认, 物品检查, 任务完成, 流程追踪]
+Description: 小明成功通过move_to_area完成跨区域移动从浴室到卧室
+Time: 2026-05-30T15:55:24+00:00
+Keywords: [跨区域移动, 卧室, move_to_area, 任务完成, 区域切换]
 Type: event
-Importance: 3
+Importance: 7
 ---
 
 ## What
-小明检查了卧室区域内床和冰箱的对象功能，并确认已完成全部交互。根据已有事件记录(event_001/event_002)和当前状态，判定该区域探索任务已达标。
+执行跨区域移动任务从浴室区域到卧室区域
 
 ## How
-1. 通过记忆检索已有的物品交互记录
-2. 对比当前视野和系统状态
-3. 确认目标物品都已成功使用
-4. 调用finish()完成当前探索阶段
+{'key_steps': ["调用move_to_area(area_type='arena', area_id='bedroom')切换区域", '确认目标区域坐标位置(x=2,y=3)和朝向(down)', '执行finish()确认任务完成'], 'obstacles': '无记录中的障碍'}
 
 ## Why
-按照区域探索流程需要逐个确认各区域物品交互完成度，确保没有遗漏且避免重复探索
+完成用户指定的跨区域移动任务，为后续卧室区域操作建立位置基础
+
+## Raw Actions
+✓ move_to_area(area_type='arena', area_id='bedroom') → {'position': {'x': 2, 'y': 3}, 'facing': 'down'}
+✓ finish(reply='成功跨区域移动至卧室区域') → {'reply': '成功跨区域移动至卧室区域'}

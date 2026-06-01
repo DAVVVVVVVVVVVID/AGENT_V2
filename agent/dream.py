@@ -374,9 +374,16 @@ class Dream:
                     added_imp = sum(
                         _parse_importance(memories.get(p, "")) for p in new_sources
                     )
+                    # 将 existing_path 规范化为相对于 memory/ 的路径：
+                    # LLM 有时会返回含 memory_dir 前缀的完整路径，需剥掉。
                     memory_dir = store.get_memory_dir()
+                    ep = Path(existing_path)
+                    try:
+                        existing_rel = str(ep.relative_to(memory_dir))
+                    except ValueError:
+                        existing_rel = existing_path
                     store.update_consolidated_memory(
-                        filepath=memory_dir / existing_path,
+                        filepath=existing_rel,
                         new_sources=new_sources,
                         new_content=op.get("content", ""),
                         added_importance=added_imp,

@@ -1,9 +1,10 @@
 ---
-Description: 选择右侧格子靠近书桌
-Time: 2026-05-30T11:38:45+00:00
-Keywords: [路径规划, 目标定位]
+Description: 跨区域移动需前置解除交互状态
+Time: 2026-05-30T16:19:33+00:00
+Keywords: [状态管理, 区域切换, 交互前提]
 Type: recognition
-Importance: 2
+Importance: 9
+Sources: [events/event_018.md, events/event_033.md, consolidated/consolidated_001.md, consolidated/consolidated_004.md]
 ---
 
-根据书桌位置，移动到最右侧的可行走格子(12,0)能缩短交互路径，符合向右靠的探索习惯。
+通过卧室到办公区案例(event_018)和浴缸解除状态(event_033)发现：执行move_to_area前必须通过leave_object解除当前交互状态。否则会产生'无法移动/互动的Buff状态'等障碍，这已被多次成功验证(consolidated_001/004)

@@ -34,12 +34,19 @@ class Perceive:
         diff     = self._compute_diff(snapshot)
         self._last_snapshot = snapshot
 
+        try:
+            pending_raw = self._client.get_chat_pending(self._entity_id)
+            pending_requests = pending_raw.get("requests", [])
+        except Exception:
+            pending_requests = []
+
         return {
-            "arena_tree":   env["arena_tree"],
-            "vision_tiles": env["vision_tiles"],
-            "front_object": env["front_object"],
-            "player_state": player,
-            "state_diff":   diff,
+            "arena_tree":            env["arena_tree"],
+            "vision_tiles":          env["vision_tiles"],
+            "front_object":          env["front_object"],
+            "player_state":          player,
+            "state_diff":            diff,
+            "pending_chat_requests": pending_requests,
         }
 
     def _compute_diff(self, current: dict) -> dict:

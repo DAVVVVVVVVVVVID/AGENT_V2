@@ -13,6 +13,7 @@ _MEMORY_DIR:          Path | None = None
 _EVENTS_DIR:          Path | None = None
 _RECOGNITIONS_DIR:    Path | None = None
 _CONSOLIDATED_DIR:    Path | None = None
+_CHATS_DIR:           Path | None = None
 _MEMORY_INDEX:        Path | None = None
 _KEYWORDS_FILE:       Path | None = None
 _PURPOSE_FILE:        Path | None = None
@@ -22,13 +23,14 @@ _DREAM_STATE_FILE:    Path | None = None
 def init(profile_dir: str | Path) -> None:
     """根据 profile 文件夹路径初始化所有记忆路径，并确保目录存在。"""
     global _MEMORY_DIR, _EVENTS_DIR, _RECOGNITIONS_DIR, _CONSOLIDATED_DIR
-    global _MEMORY_INDEX, _KEYWORDS_FILE, _PURPOSE_FILE, _DREAM_STATE_FILE
+    global _CHATS_DIR, _MEMORY_INDEX, _KEYWORDS_FILE, _PURPOSE_FILE, _DREAM_STATE_FILE
 
     base = Path(profile_dir) / "memory"
     _MEMORY_DIR        = base
     _EVENTS_DIR        = base / "events"
     _RECOGNITIONS_DIR  = base / "recognitions"
     _CONSOLIDATED_DIR  = base / "consolidated"
+    _CHATS_DIR         = base / "chats"
     _MEMORY_INDEX      = base / "Memory.md"
     _KEYWORDS_FILE     = base / "keywords.md"
     _PURPOSE_FILE      = base / "purpose.md"
@@ -37,6 +39,7 @@ def init(profile_dir: str | Path) -> None:
     _EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     _RECOGNITIONS_DIR.mkdir(parents=True, exist_ok=True)
     _CONSOLIDATED_DIR.mkdir(parents=True, exist_ok=True)
+    _CHATS_DIR.mkdir(parents=True, exist_ok=True)
 
     if not _MEMORY_INDEX.exists():
         _MEMORY_INDEX.write_text("# Memory Index\n", encoding="utf-8")
@@ -82,6 +85,11 @@ def get_memory_index() -> Path:
 def get_consolidated_dir() -> Path:
     _require_init()
     return _CONSOLIDATED_DIR  # type: ignore[return-value]
+
+
+def get_chats_dir() -> Path:
+    _require_init()
+    return _CHATS_DIR  # type: ignore[return-value]
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
@@ -225,10 +233,12 @@ def delete_memory_file(path: str) -> bool:
     events_dir       = _EVENTS_DIR.resolve()        # type: ignore[union-attr]
     recognitions_dir = _RECOGNITIONS_DIR.resolve()  # type: ignore[union-attr]
     consolidated_dir = _CONSOLIDATED_DIR.resolve()  # type: ignore[union-attr]
+    chats_dir        = _CHATS_DIR.resolve()         # type: ignore[union-attr]
     allowed = (
         str(fp).startswith(str(events_dir))
         or str(fp).startswith(str(recognitions_dir))
         or str(fp).startswith(str(consolidated_dir))
+        or str(fp).startswith(str(chats_dir))
     )
     if not allowed:
         raise ValueError(f"不允许删除该路径：{path}")
@@ -294,6 +304,14 @@ def get_keywords_index() -> dict[str, list[str]]:
     _require_init()
     data = _parse_keywords_file()
     return {kw: files for kw, (count, files) in data.items()}
+
+
+def get_top_keywords(n: int = 50) -> list[str]:
+    """返回按引用次数排序的前 n 个关键词。"""
+    _require_init()
+    data = _parse_keywords_file()
+    sorted_kws = sorted(data.items(), key=lambda x: x[1][0], reverse=True)
+    return [kw for kw, _ in sorted_kws[:n]]
 
 
 def read_purpose() -> str:
@@ -447,10 +465,10 @@ def read_last_dream_time() -> datetime | None:
 
 
 def get_new_memory_count(since: datetime) -> int:
-    """统计 since 时间之后新增的记忆数（events + recognitions，不含 consolidated）。"""
+    """统计 since 时间之后新增的记忆数（events + recognitions + chats，不含 consolidated）。"""
     _require_init()
     count = 0
-    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR):
+    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR, _CHATS_DIR):
         for fp in directory.glob("*.md"):  # type: ignore[union-attr]
             text = fp.read_text(encoding="utf-8")
             m = re.search(r"^Time:\s*(.+)$", text, re.MULTILINE)
@@ -465,10 +483,10 @@ def get_new_memory_count(since: datetime) -> int:
 
 
 def get_memories_since(since: datetime) -> list[Path]:
-    """返回 since 时间之后新增的记忆文件路径列表（events + recognitions）。"""
+    """返回 since 时间之后新增的记忆文件路径列表（events + recognitions + chats）。"""
     _require_init()
     result = []
-    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR):
+    for directory in (_EVENTS_DIR, _RECOGNITIONS_DIR, _CHATS_DIR):
         for fp in sorted(directory.glob("*.md")):  # type: ignore[union-attr]
             text = fp.read_text(encoding="utf-8")
             m = re.search(r"^Time:\s*(.+)$", text, re.MULTILINE)
@@ -480,6 +498,53 @@ def get_memories_since(since: datetime) -> list[Path]:
                 except ValueError:
                     pass
     return result
+
+
+def _participant_name(entity_id: str) -> str:
+    """从 entity ID（如 david_00d133）中提取显示名称（如 david）。"""
+    m = re.match(r'^(.+)_[0-9a-f]{6,}$', entity_id, re.IGNORECASE)
+    return m.group(1) if m else entity_id
+
+
+def create_chat_memory(
+    participants: list[str],
+    summary: str,
+    topic: str,
+    key_info: str,
+    outcome: str,
+    importance: int,
+    keywords: list[str],
+) -> Path:
+    """创建一条对话记忆文件（chat_NNN.md），写入索引和关键词。"""
+    _require_init()
+    file_id  = _next_id(_CHATS_DIR, "chat")  # type: ignore[arg-type]
+    filepath = _CHATS_DIR / f"{file_id}.md"  # type: ignore[operator]
+    now      = _now_iso()
+
+    # 提取参与者显示名并合并进关键词
+    participant_names = [_participant_name(p) for p in participants]
+    all_keywords = list(dict.fromkeys(keywords + participant_names))  # 去重保序
+
+    kw_str   = ", ".join(all_keywords)
+    part_str = ", ".join(participants)
+
+    filepath.write_text(
+        f"---\n"
+        f"Type: chat\n"
+        f"Participants: [{part_str}]\n"
+        f"Time: {now}\n"
+        f"Summary: {summary}\n"
+        f"Importance: {importance}\n"
+        f"Keywords: [{kw_str}]\n"
+        f"---\n\n"
+        f"## 主题\n{topic}\n\n"
+        f"## 关键信息\n{key_info}\n\n"
+        f"## 结果\n{outcome}\n",
+        encoding="utf-8",
+    )
+    update_memory_index(filepath, summary, now, importance)
+    update_keywords(all_keywords, filepath)
+    return filepath
 
 
 # ── 清除函数 ──────────────────────────────────────────────────────────────────
@@ -506,6 +571,15 @@ def clear_consolidated() -> int:
     _require_init()
     count = 0
     for f in _CONSOLIDATED_DIR.glob("*.md"):  # type: ignore[union-attr]
+        f.unlink()
+        count += 1
+    return count
+
+
+def clear_chats() -> int:
+    _require_init()
+    count = 0
+    for f in _CHATS_DIR.glob("*.md"):  # type: ignore[union-attr]
         f.unlink()
         count += 1
     return count

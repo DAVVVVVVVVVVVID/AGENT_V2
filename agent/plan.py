@@ -61,10 +61,14 @@ def _build_user_message(
     purpose: str,
     perceive_result: dict,
     retrieved_memories: list[str],
+    reorient_hint: str = "",
 ) -> str:
     parts = [
         f"【Purpose（最高目标）】\n{purpose}",
     ]
+
+    if reorient_hint and reorient_hint != "继续原计划":
+        parts.append(f"【刚完成一次对话，建议参考以下方向】\n{reorient_hint}")
 
     if retrieved_memories:
         mem_text = "\n\n---\n\n".join(retrieved_memories)
@@ -94,6 +98,7 @@ class Planner:
         purpose: str,
         perceive_result: dict,
         retrieved_memories: list[str] | None = None,
+        reorient_hint: str = "",
     ) -> list[str]:
         """
         根据 Purpose + 感知 + 检索记忆，生成有序 Plan 列表。
@@ -101,7 +106,8 @@ class Planner:
         """
         system   = _build_system_prompt(self._name)
         user_msg = _build_user_message(
-            self._name, purpose, perceive_result, retrieved_memories or []
+            self._name, purpose, perceive_result, retrieved_memories or [],
+            reorient_hint=reorient_hint,
         )
         messages = [
             {"role": "system", "content": system},

@@ -92,6 +92,59 @@ class SandboxClient:
         """GET /agent/object-position — anchor position of the given object."""
         return self._get("/agent/object-position", params={"object_id": object_id})
 
+    # ── chat endpoints ────────────────────────────────────────────────────
+
+    def get_chat_nearby(self, entity_id: str) -> dict:
+        """GET /chat/nearby — players in the same arena."""
+        return self._get("/chat/nearby", params={"entity_id": entity_id})
+
+    def post_chat_request(self, from_entity_id: str, to_entity_ids: list[str], greeting: str) -> dict:
+        """POST /chat/request — send a chat invitation."""
+        return self._post("/chat/request", {
+            "from_entity_id": from_entity_id,
+            "to_entity_ids": to_entity_ids,
+            "greeting": greeting,
+        })
+
+    def get_chat_pending(self, entity_id: str) -> dict:
+        """GET /chat/pending — pending chat requests for this entity."""
+        return self._get("/chat/pending", params={"entity_id": entity_id})
+
+    def get_chat_request_status(self, request_id: str) -> dict:
+        """GET /chat/request/{request_id} — request status including chat_room_id."""
+        return self._get(f"/chat/request/{request_id}")
+
+    def post_chat_respond(self, entity_id: str, request_id: str, accept: bool, message: str) -> dict:
+        """POST /chat/respond — accept or reject a chat request."""
+        return self._post("/chat/respond", {
+            "entity_id": entity_id,
+            "request_id": request_id,
+            "accept": accept,
+            "message": message,
+        })
+
+    def get_chat_room(self, chat_room_id: str, entity_id: str, since_seq: int = 0) -> dict:
+        """GET /chat/room/{id} — incremental poll for messages and events."""
+        return self._get(
+            f"/chat/room/{chat_room_id}",
+            params={"entity_id": entity_id, "since_seq": since_seq},
+        )
+
+    def post_chat_message(self, entity_id: str, chat_room_id: str, content: str) -> dict:
+        """POST /chat/message — send a message to a chat room."""
+        return self._post("/chat/message", {
+            "entity_id": entity_id,
+            "chat_room_id": chat_room_id,
+            "content": content,
+        })
+
+    def post_chat_exit(self, entity_id: str, chat_room_id: str) -> dict:
+        """POST /chat/exit — leave a chat room."""
+        return self._post("/chat/exit", {
+            "entity_id": entity_id,
+            "chat_room_id": chat_room_id,
+        })
+
     # ── action endpoint ────────────────────────────────────────────────────
 
     def post_action(

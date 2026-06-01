@@ -1,16 +1,20 @@
 ---
-Description: 小明成功在卧室区域找到并使用床完成交互
-Time: 2026-05-30T12:13:02+00:00
-Keywords: [卧室床交互, 位置定位, 移动路径, 对象使用, 任务完成]
+Description: 小明通过解除浴缸使用状态并结束任务完成交互
+Time: 2026-05-30T16:11:17+00:00
+Keywords: [解除使用状态, 结束任务, leave_object, Finish, 浴缸]
 Type: event
-Importance: 7
+Importance: 5
 ---
 
 ## What
-定位床对象位置并移动至相邻可行走格子(2,3)，调整姿态后完成交互并解除占用
+小明需要解除对浴缸的使用状态并结束任务，通过调用leave_object和finish完成流程。
 
 ## How
-{'description': '通过get_object_position获取对象位置信息，调用move_to_tile到达目标坐标，使用use_object完成交互，最后以leave_object释放资源', 'type': 'string'}
+1. 检查当前状态后调用leave_object解除浴缸使用；2. 确认无其他限制后调用finish；3. 处理过程中发现并解除no_move和no_interact的buff限制
 
 ## Why
-执行用户设定的移动并交互计划，获取床的休憩资源
+任务要求必须先解除使用状态才能正式结束，且Finish必须是最后一步操作，符合之前历史记录的常规流程
+
+## Raw Actions
+✓ leave_object() → {'objectId': 'bath_1779367293480'}
+✓ finish(reply='成功结束浴室浴缸交互任务') → {'reply': '成功结束浴室浴缸交互任务'}

@@ -193,6 +193,28 @@ class Execute:
             return _ok({"objectId": r.get("objectId")})
         return _fail("当前没有正在使用的对象")
 
+    # ── Chat ─────────────────────────────────────────────────────────────────
+
+    def _find_nearby_players(self, args: dict) -> dict:
+        data = self._client.get_chat_nearby(self._eid)
+        players = data.get("players", [])
+        if not players:
+            return _ok({"players": [], "message": "附近没有其他 Player"})
+        desc = "、".join(f"{p['name']}（{p['entity_id']}）" for p in players)
+        return _ok({"players": players, "message": f"附近有 {len(players)} 位：{desc}"})
+
+    def _send_chat_request(self, args: dict) -> dict:
+        to_ids   = args["to_entity_ids"]
+        greeting = args["greeting"]
+        try:
+            data = self._client.post_chat_request(self._eid, to_ids, greeting)
+            return _ok({
+                "request_id": data["request_id"],
+                "message":    f"已向 {len(to_ids)} 位发送对话邀请",
+            })
+        except Exception as e:
+            return _fail(f"发送对话请求失败：{e}")
+
     # ── Recognition ──────────────────────────────────────────────────────────
 
     def _record_recognition(self, args: dict) -> dict:
@@ -244,6 +266,8 @@ _HANDLERS: dict[str, callable] = {
     "use_object":          Execute._use_object,
     "observe_object":      Execute._observe_object,
     "leave_object":        Execute._leave_object,
+    "find_nearby_players": Execute._find_nearby_players,
+    "send_chat_request":   Execute._send_chat_request,
     "record_recognition":  Execute._record_recognition,
     "finish":              Execute._finish,
 }

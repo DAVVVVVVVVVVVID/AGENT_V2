@@ -27,6 +27,7 @@ from agent.loop import run as run_loop
 from agent.memory import store
 from agent.memory.store import (
     clear_events, clear_recognitions, clear_consolidated, clear_auxiliary, reset_purpose,
+    clear_chats,
 )
 from agent.perceive import Perceive
 from agent.personality import ocean_to_description
@@ -66,11 +67,13 @@ _use_file_plans_flag  = threading.Event()
 _pause_flag.set()
 _msg_queue: queue.Queue[dict] = queue.Queue()
 _shared_state: dict = {
-    "history":      [],
-    "perceive":     None,
-    "current_plan": "",
-    "plan_batch":   [],
-    "plan_index":   0,
+    "history":             [],
+    "perceive":            None,
+    "current_plan":        "",
+    "plan_batch":          [],
+    "plan_index":          0,
+    "cfg":                 {},
+    "current_chat_room_id": None,
 }
 
 # ── logging state ─────────────────────────────────────────────────────────────
@@ -81,6 +84,7 @@ _current_logger: AgentLogger | None = None
 def _run_loop_thread() -> None:
     global _current_logger
     cfg    = _cfg
+    _shared_state["cfg"] = cfg
     logger: AgentLogger | None = None
     try:
         if _logging_enabled:
@@ -215,7 +219,7 @@ def start_loop() -> dict:
     _use_file_plans_flag.clear()
     while not _msg_queue.empty():
         _msg_queue.get_nowait()
-    _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0})
+    _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0, "current_chat_room_id": None})
     _loop_thread = threading.Thread(target=_run_loop_thread, daemon=True)
     _loop_thread.start()
     return {"ok": True}
@@ -285,7 +289,7 @@ def use_file_plans() -> dict:
     _interrupt_flag.clear()
     while not _msg_queue.empty():
         _msg_queue.get_nowait()
-    _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0})
+    _shared_state.update({"current_plan": "", "plan_batch": [], "plan_index": 0, "current_chat_room_id": None})
     _loop_thread = threading.Thread(target=_run_loop_thread, daemon=True)
     _loop_thread.start()
     return {"ok": True, "todo_count": todo_count, "started": True}
@@ -355,6 +359,78 @@ def chat_message(body: dict) -> dict:
     return {"ok": True, "reply": reply}
 
 
+# ── Chat 端点（Task 09）──────────────────────────────────────────────────────
+
+@app.get("/chat/status")
+def ui_chat_status() -> dict:
+    """返回 agent 当前是否处于对话状态。"""
+    try:
+        player = _client.get_player(_player_id)
+        buffs = player.get("buffs", [])
+        in_chat = any(
+            (b["key"] if isinstance(b, dict) else b) == "chat_active"
+            for b in buffs
+        )
+    except Exception:
+        in_chat = False
+    return {
+        "in_chat":      in_chat,
+        "chat_room_id": _shared_state.get("current_chat_room_id"),
+    }
+
+
+@app.get("/chat/nearby")
+def ui_chat_nearby() -> dict:
+    """查询附近可对话的 Player。"""
+    try:
+        return _client.get_chat_nearby(_player_id)
+    except Exception as e:
+        return {"players": [], "error": str(e)}
+
+
+@app.post("/chat/request")
+def ui_chat_request(body: dict) -> dict:
+    """向指定 Player 发起对话邀请。"""
+    to_entity_ids = body.get("to_entity_ids", [])
+    greeting = body.get("greeting", "你好！")
+    try:
+        return _client.post_chat_request(_player_id, to_entity_ids, greeting)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/chat/room/{chat_room_id}")
+def ui_chat_room(chat_room_id: str, since_seq: int = 0) -> dict:
+    """轮询聊天室状态（增量拉取）。"""
+    try:
+        return _client.get_chat_room(chat_room_id, _player_id, since_seq)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/chat/message")
+def ui_chat_message(body: dict) -> dict:
+    """在聊天室中发言。"""
+    chat_room_id = body.get("chat_room_id", "")
+    content = body.get("content", "").strip()
+    if not content:
+        return {"ok": False, "reason": "content is empty"}
+    try:
+        return _client.post_chat_message(_player_id, chat_room_id, content)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/chat/exit")
+def ui_chat_exit(body: dict) -> dict:
+    """退出聊天室。"""
+    chat_room_id = body.get("chat_room_id", "")
+    try:
+        return _client.post_chat_exit(_player_id, chat_room_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/memory/clear")
 def memory_clear(body: dict) -> dict:
     """
@@ -364,7 +440,7 @@ def memory_clear(body: dict) -> dict:
     """
     types = body.get("types", [])
     if "all" in types:
-        types = ["events", "recognitions", "consolidated", "auxiliary", "purpose"]
+        types = ["events", "recognitions", "consolidated", "auxiliary", "purpose", "chat"]
 
     summary = {}
     if "events" in types:
@@ -373,6 +449,8 @@ def memory_clear(body: dict) -> dict:
         summary["recognitions"] = clear_recognitions()
     if "consolidated" in types:
         summary["consolidated"] = clear_consolidated()
+    if "chat" in types:
+        summary["chat"] = clear_chats()
     if "auxiliary" in types:
         clear_auxiliary()
         summary["auxiliary"] = "已重置"
@@ -416,12 +494,14 @@ def set_purpose(body: dict) -> dict:
 
 @app.get("/memory/files")
 def memory_files(type: str = "events") -> dict:
-    """返回 events / recognitions / consolidated 的文件列表，含 frontmatter 元数据。"""
+    """返回 events / recognitions / consolidated / chats 的文件列表，含 frontmatter 元数据。"""
     import re
     if type == "events":
         directory = store.get_events_dir()
     elif type == "consolidated":
         directory = store.get_consolidated_dir()
+    elif type == "chats":
+        directory = store.get_chats_dir()
     else:
         directory = store.get_recognitions_dir()
     files = []
@@ -434,14 +514,19 @@ def memory_files(type: str = "events") -> dict:
                 if ":" in line:
                     k, _, v = line.partition(":")
                     meta[k.strip()] = v.strip()
-        files.append({
-            "name":        f.name,
-            "path":        f"{type}/{f.name}",
-            "description": meta.get("Description", ""),
-            "time":        meta.get("Time", ""),
-            "importance":  meta.get("Importance", ""),
-            "keywords":    meta.get("Keywords", ""),
-        })
+        entry = {
+            "name":       f.name,
+            "path":       f"{type}/{f.name}",
+            "time":       meta.get("Time", ""),
+            "importance": meta.get("Importance", ""),
+            "keywords":   meta.get("Keywords", ""),
+        }
+        if type == "chats":
+            entry["summary"]      = meta.get("Summary", "")
+            entry["participants"] = meta.get("Participants", "")
+        else:
+            entry["description"] = meta.get("Description", "")
+        files.append(entry)
     files.sort(key=lambda x: x["time"], reverse=True)
     return {"type": type, "files": files}
 
@@ -698,6 +783,33 @@ _HTML = r"""<!DOCTYPE html>
   #modal-confirm { background: #991b1b; color: #fca5a5; }
   #modal-confirm:hover { background: #7f1d1d; }
   #modal-confirm:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+
+  /* ── World Chat Panel ────────────────────────────────────────────────────── */
+  .chat-panel { position: fixed; bottom: 0; right: 20px; width: 380px; height: 320px; background: #1a1d27; border: 1px solid #2d3148; border-radius: 8px 8px 0 0; display: none; flex-direction: column; z-index: 1000; box-shadow: 0 -4px 20px #00000066; }
+  .chat-panel.open { display: flex; }
+  .chat-panel-hd { background: #13161f; padding: 8px 12px; display: flex; align-items: center; gap: 8px; border-radius: 8px 8px 0 0; border-bottom: 1px solid #2d3148; flex-shrink: 0; }
+  .cp-title { font-size: 12px; font-weight: 600; color: #22d3ee; }
+  .cp-room  { font-size: 11px; color: #4b5563; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-panel-hd button { padding: 3px 10px; background: #1e2235; border: 1px solid #2d3148; color: #9ca3af; border-radius: 4px; font-size: 11px; cursor: pointer; }
+  .chat-panel-hd button:hover { color: #e2e8f0; background: #2d3148; }
+  .wc-msgs { flex: 1; overflow-y: auto; padding: 8px 12px; }
+  .wc-msgs::-webkit-scrollbar { width: 3px; }
+  .wc-msgs::-webkit-scrollbar-thumb { background: #2d3148; }
+  .wc-msg-self   { color: #89b4fa; text-align: right; font-size: 13px; margin: 3px 0; }
+  .wc-msg-other  { color: #d1d5db; font-size: 13px; margin: 3px 0; }
+  .wc-msg-system { color: #4b5563; font-style: italic; font-size: 11px; margin: 2px 0; }
+  .wc-input-row  { padding: 6px 8px; display: flex; gap: 6px; border-top: 1px solid #1e2235; flex-shrink: 0; }
+  .wc-input-row input { flex: 1; background: #0f1117; border: 1px solid #2d3148; border-radius: 4px; color: #e2e8f0; padding: 5px 8px; font-size: 13px; outline: none; }
+  .wc-input-row input:focus { border-color: #22d3ee; }
+  #chat-status-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #0e7490; color: #22d3ee; cursor: pointer; }
+  .log-entry.chat           { border-color: #0e7490; }
+  .log-entry.chat           .log-tag { color: #22d3ee; }
+  .log-entry.chat-speak     { border-color: #1d4ed8; }
+  .log-entry.chat-speak     .log-tag { color: #60a5fa; }
+  .log-entry.chat-wait      { border-color: #374151; }
+  .log-entry.chat-wait      .log-tag { color: #6b7280; }
+  .log-entry.chat-reorient  { border-color: #92400e; }
+  .log-entry.chat-reorient  .log-tag { color: #fbbf24; }
 </style>
 </head>
 <body>
@@ -705,6 +817,7 @@ _HTML = r"""<!DOCTYPE html>
 <header>
   <h1>Agent v2</h1>
   <span id="status-badge">空闲</span>
+  <span id="chat-status-badge" title="点击打开聊天室" onclick="onChatBadgeClick()" style="display:none">💬 对话中</span>
   <a href="/memory-viewer" target="_blank" style="font-size:12px;color:#6b7280;text-decoration:none;padding:3px 10px;border:1px solid #2d3148;border-radius:6px;">记忆查看器 ↗</a>
   <div class="log-toggle-wrap">
     <span class="log-toggle-label">记录日志</span>
@@ -806,6 +919,22 @@ _HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- 世界聊天室浮动面板 -->
+<div id="chat-panel" class="chat-panel">
+  <div class="chat-panel-hd">
+    <span class="cp-title">💬 聊天室</span>
+    <span id="cp-room-id" class="cp-room"></span>
+    <button onclick="sendWorldChat()">发送</button>
+    <button onclick="exitWorldChat()">退出</button>
+    <button onclick="closeChatPanel()">收起</button>
+  </div>
+  <div id="wc-msgs" class="wc-msgs"></div>
+  <div class="wc-input-row">
+    <input type="text" id="wc-input" placeholder="输入消息…"
+           onkeydown="if(event.key==='Enter') sendWorldChat()">
+  </div>
+</div>
+
 <footer>
   <button id="btn-start" onclick="startLoop()">启动</button>
   <button id="btn-pause" disabled onclick="togglePause()">暂停</button>
@@ -829,6 +958,10 @@ const footerInfo  = document.getElementById('footer-info')
 const chatSection = document.getElementById('chat-section')
 let ws = null
 let loopState = 'idle'
+let _wcRoomId = null
+let _wcSinceSeq = 0
+let _wcPollTimer = null
+let _myEntityId = ''
 
 // ── logging ──────────────────────────────────────────────────────────────────
 fetch('/logging').then(r=>r.json()).then(renderLogStatus)
@@ -850,6 +983,7 @@ function renderLogStatus(d) {
 
 // ── agent config ─────────────────────────────────────────────────────────────
 fetch('/agent-config').then(r=>r.json()).then(cfg => {
+  _myEntityId = cfg.entity_id
   const ocean = cfg.ocean
   const bars  = ['O','C','E','A','N'].map(k=>`
     <div class="ocean-bar">
@@ -922,6 +1056,7 @@ async function forceResetPlayer() {
 }
 setInterval(()=>fetch('/player-status').then(r=>r.json()).then(renderPlayer), 500)
 fetch('/player-status').then(r=>r.json()).then(renderPlayer)
+setInterval(pollChatStatus, 2000)
 
 // ── plan status ──────────────────────────────────────────────────────────────
 let _planBatch = []; let _planIndex = 0
@@ -947,6 +1082,8 @@ function renderPlan(batch, idx) {
 
 // ── log rendering ────────────────────────────────────────────────────────────
 function appendLog(msg) {
+  if (msg.type === 'chat_aftermath_done') return
+  if (msg.type === 'chat_reorient' && !msg.needs_reorient) return
   const div = document.createElement('div')
   let cls='warning', tag=msg.type, text=''
 
@@ -996,6 +1133,65 @@ function appendLog(msg) {
     cls='dream-step'; tag=`Dream · ${stepLabel}`; text=msg.summary||''
   } else if (msg.type === 'dream_end') {
     cls='dream-end'; tag='Dream 结束'; text=`Purpose: ${msg.purpose_action||''}`
+  } else if (msg.type === 'chat_retrieve') {
+    const stageLabel = {'initial_behavior':'检索·近期行为','initial_partner':'检索·对话对象','dynamic':'检索·当前对话','initial':'检索·阶段一'}[msg.stage] || '记忆检索'
+    const kwText     = (msg.keywords||[]).join('、') || '（无）'
+    const hitsText   = (msg.hits||[]).length > 0 ? (msg.hits||[]).join('\n') : '（无命中）'
+    const _promptHtmlR = msg.prompt ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ Prompt</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.prompt||'')}</div></details>` : ''
+    const _rawHtmlR    = msg.raw   ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ LLM 回复</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.raw||'')}</div></details>` : ''
+    const _hitsHtmlR   = `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ 命中记忆</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(hitsText)}</div></details>`
+    div.className = 'log-entry chat'
+    div.innerHTML = `<div class="log-tag">${stageLabel}</div><div class="log-text">关键词：${esc(kwText)}${_promptHtmlR}${_rawHtmlR}${_hitsHtmlR}</div>`
+    logPanel.appendChild(div); logPanel.scrollTop = logPanel.scrollHeight; return
+  } else if (msg.type === 'chat_judgment') {
+    const _result = (msg.accept ? '✅ 接受' : '❌ 拒绝') + ' — ' + esc(msg.message||'')
+    const _promptHtml = (msg.system_prompt || msg.user_prompt) ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ Prompt</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap"><span style="color:#38bdf8">[System]</span>\n${esc(msg.system_prompt||'')}\n\n<span style="color:#38bdf8">[User]</span>\n${esc(msg.user_prompt||'')}</div></details>` : ''
+    const _replyHtml  = msg.raw_response ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ LLM 回复</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.raw_response||'')}</div></details>` : ''
+    div.className = 'log-entry chat'
+    div.innerHTML = `<div class="log-tag">对话判断</div><div class="log-text">${_result}${_promptHtml}${_replyHtml}</div>`
+    logPanel.appendChild(div)
+    logPanel.scrollTop = logPanel.scrollHeight
+    return
+  } else if (msg.type === 'chat_session_start') {
+    cls='chat'; tag='进入聊天室'; text=msg.chat_room_id||''
+    openChatPanel(msg.chat_room_id)
+  } else if (msg.type === 'chat_speak') {
+    const _promptHtml = (msg.system_prompt || msg.user_prompt) ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ Prompt</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap"><span style="color:#38bdf8">[System]</span>\n${esc(msg.system_prompt||'')}\n\n<span style="color:#38bdf8">[User]</span>\n${esc(msg.user_prompt||'')}</div></details>` : ''
+    const _replyHtml  = msg.raw_response ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ LLM 回复</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.raw_response||'')}</div></details>` : ''
+    div.className = 'log-entry chat-speak'
+    div.innerHTML = `<div class="log-tag">我说</div><div class="log-text">${esc(msg.content||'')}${_promptHtml}${_replyHtml}</div>`
+    logPanel.appendChild(div); logPanel.scrollTop = logPanel.scrollHeight; return
+  } else if (msg.type === 'chat_wait') {
+    const _promptHtml2 = (msg.system_prompt || msg.user_prompt) ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ Prompt</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap"><span style="color:#38bdf8">[System]</span>\n${esc(msg.system_prompt||'')}\n\n<span style="color:#38bdf8">[User]</span>\n${esc(msg.user_prompt||'')}</div></details>` : ''
+    const _replyHtml2  = msg.raw_response ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ LLM 回复</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.raw_response||'')}</div></details>` : ''
+    div.className = 'log-entry chat-wait'
+    div.innerHTML = `<div class="log-tag">等待回应</div><div class="log-text">第 ${msg.streak||1} 次${_promptHtml2}${_replyHtml2}</div>`
+    logPanel.appendChild(div); logPanel.scrollTop = logPanel.scrollHeight; return
+  } else if (msg.type === 'chat_exit') {
+    const _promptHtml3 = (msg.system_prompt || msg.user_prompt) ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ Prompt</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap"><span style="color:#38bdf8">[System]</span>\n${esc(msg.system_prompt||'')}\n\n<span style="color:#38bdf8">[User]</span>\n${esc(msg.user_prompt||'')}</div></details>` : ''
+    const _replyHtml3  = msg.raw_response ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none">▶ LLM 回复</summary><div style="margin-top:4px;padding:6px 8px;background:#111827;border-radius:4px;font-size:11px;color:#9ca3af;white-space:pre-wrap">${esc(msg.raw_response||'')}</div></details>` : ''
+    div.className = 'log-entry chat'
+    div.innerHTML = `<div class="log-tag">退出对话</div><div class="log-text">${esc(msg.reason||'')}${_promptHtml3}${_replyHtml3}</div>`
+    logPanel.appendChild(div); logPanel.scrollTop = logPanel.scrollHeight
+    closeChatPanel(); return
+  } else if (msg.type === 'chat_session_end') {
+    cls='chat'; tag='对话结束'; text=`原因: ${msg.exit_reason||''}`
+  } else if (msg.type === 'chat_memory_saved') {
+    cls='chat'; tag='对话记忆'; text=`已保存：${msg.path||''}`
+  } else if (msg.type === 'chat_reorient') {
+    cls='chat-reorient'; tag='重新定向'; text=msg.hint||''
+  } else if (msg.type === 'chat_done_replan') {
+    cls='chat'; tag='对话完成'; text='对话结束，重新规划中…'
+  } else if (msg.type === 'chat_aftermath_start') {
+    cls='chat'; tag='对话后处理'; text='整理对话记忆…'
+  } else if (msg.type === 'dream_triggered_by_chat') {
+    cls='dream-start'; tag='Dream（对话触发）'; text='对话后触发认知整理…'
+  } else if (msg.type === 'chat_event') {
+    cls='chat'; tag='聊天室事件'; text=JSON.stringify(msg.event||{})
+  } else if (msg.type === 'chat_warning') {
+    cls='warning'; tag='对话警告'; text=msg.content||''
+  } else if (msg.type === 'chat_waiting') {
+    cls='chat'; tag='等待接受'; text='等待对方接受对话请求…'
   }
 
   div.className = `log-entry ${cls}`
@@ -1180,6 +1376,96 @@ function appendChatBubble(role, text) {
 }
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+// ── world chat panel ──────────────────────────────────────────────────────────
+function openChatPanel(roomId) {
+  if (_wcRoomId === roomId && document.getElementById('chat-panel').classList.contains('open')) return
+  _wcRoomId = roomId
+  _wcSinceSeq = 0
+  document.getElementById('chat-panel').classList.add('open')
+  document.getElementById('cp-room-id').textContent = roomId || ''
+  document.getElementById('wc-msgs').innerHTML = ''
+  if (_wcPollTimer) clearInterval(_wcPollTimer)
+  _wcPollTimer = setInterval(pollWorldChat, 2000)
+}
+function closeChatPanel() {
+  document.getElementById('chat-panel').classList.remove('open')
+  if (_wcPollTimer) { clearInterval(_wcPollTimer); _wcPollTimer = null }
+}
+function onChatBadgeClick() {
+  const panel = document.getElementById('chat-panel')
+  if (panel.classList.contains('open')) closeChatPanel()
+  else if (_wcRoomId) openChatPanel(_wcRoomId)
+}
+async function pollWorldChat() {
+  if (!_wcRoomId) return
+  try {
+    const res = await fetch(`/chat/room/${_wcRoomId}?since_seq=${_wcSinceSeq}`)
+    const data = await res.json()
+    if (data.error || data.status === 'closed') {
+      appendWCMsg('（聊天室已关闭）', 'system')
+      closeChatPanel()
+      return
+    }
+    for (const m of (data.messages||[])) {
+      const isSelf = m.from_entity_id === _myEntityId
+      appendWCMsg(`${isSelf ? '我' : m.from_entity_id}: ${m.content}`, isSelf ? 'self' : 'other')
+      _wcSinceSeq = Math.max(_wcSinceSeq, m.seq)
+    }
+    for (const evt of (data.events||[])) {
+      if (evt.type === 'player_exit') appendWCMsg(`${evt.entity_id} 离开了对话`, 'system')
+      _wcSinceSeq = Math.max(_wcSinceSeq, evt.seq)
+    }
+  } catch(e) { /* 静默忽略 */ }
+}
+function appendWCMsg(text, type) {
+  const div = document.getElementById('wc-msgs')
+  const p = document.createElement('p')
+  p.className = `wc-msg-${type}`
+  p.style.margin = '3px 0'
+  p.textContent = text
+  div.appendChild(p)
+  div.scrollTop = div.scrollHeight
+}
+async function sendWorldChat() {
+  const input = document.getElementById('wc-input')
+  const content = input.value.trim()
+  if (!content || !_wcRoomId) return
+  input.value = ''
+  try {
+    await fetch('/chat/message', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_room_id: _wcRoomId, content}),
+    })
+  } catch(e) { appendWCMsg(`发送失败：${e}`, 'system') }
+}
+async function exitWorldChat() {
+  if (!_wcRoomId) return
+  try {
+    await fetch('/chat/exit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_room_id: _wcRoomId}),
+    })
+  } catch(e) {}
+  closeChatPanel()
+  _wcRoomId = null
+}
+async function pollChatStatus() {
+  try {
+    const data = await fetch('/chat/status').then(r=>r.json())
+    const badge = document.getElementById('chat-status-badge')
+    if (data.in_chat) {
+      badge.style.display = 'inline'
+      if (data.chat_room_id && _wcRoomId !== data.chat_room_id) {
+        openChatPanel(data.chat_room_id)
+      }
+    } else {
+      badge.style.display = 'none'
+    }
+  } catch(e) {}
 }
 
 // ── 清除记忆弹窗 ─────────────────────────────────────────────────────────────
@@ -1380,6 +1666,10 @@ _MEMORY_HTML = r"""<!DOCTYPE html>
       <span class="nav-icon">🔮</span> Consolidated
       <span class="nav-count" id="cnt-consolidated">-</span>
     </div>
+    <div class="nav-item" onclick="showSection('chats')" id="nav-chats">
+      <span class="nav-icon">💬</span> Chat
+      <span class="nav-count" id="cnt-chats">-</span>
+    </div>
   </div>
 
   <!-- 右侧内容 -->
@@ -1397,22 +1687,25 @@ _MEMORY_HTML = r"""<!DOCTYPE html>
 
 <script>
 let _currentSection = null
-let _eventsData = [], _recognitionsData = [], _consolidatedData = []
+let _eventsData = [], _recognitionsData = [], _consolidatedData = [], _chatsData = []
 let _selectedFile = null
 
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 async function init() {
-  const [ev, rc, co] = await Promise.all([
+  const [ev, rc, co, ch] = await Promise.all([
     fetch('/memory/files?type=events').then(r=>r.json()),
     fetch('/memory/files?type=recognitions').then(r=>r.json()),
     fetch('/memory/files?type=consolidated').then(r=>r.json()),
+    fetch('/memory/files?type=chats').then(r=>r.json()),
   ])
   _eventsData = ev.files
   _recognitionsData = rc.files
   _consolidatedData = co.files
+  _chatsData = ch.files
   document.getElementById('cnt-events').textContent = ev.files.length
   document.getElementById('cnt-recognitions').textContent = rc.files.length
   document.getElementById('cnt-consolidated').textContent = co.files.length
+  document.getElementById('cnt-chats').textContent = ch.files.length
 }
 init()
 
@@ -1436,6 +1729,7 @@ function showSection(sec) {
     events:       () => showFileSection('events'),
     recognitions: () => showFileSection('recognitions'),
     consolidated: () => showFileSection('consolidated'),
+    chats:        () => showFileSection('chats'),
   }
   handlers[sec]?.()
 }
@@ -1585,11 +1879,12 @@ async function showKeywords() {
 
 // ── Events / Recognitions ─────────────────────────────────────────────────────
 async function showFileSection(type) {
-  const labelMap = {events:'Events', recognitions:'Recognitions', consolidated:'Consolidated'}
+  const labelMap = {events:'Events', recognitions:'Recognitions', consolidated:'Consolidated', chats:'Chat 对话'}
   setHeader(labelMap[type] || type, `memory/${type}/`)
   const d = await fetch(`/memory/files?type=${type}`).then(r=>r.json())
   if (type === 'events') _eventsData = d.files
   else if (type === 'consolidated') _consolidatedData = d.files
+  else if (type === 'chats') _chatsData = d.files
   else _recognitionsData = d.files
   document.getElementById(`cnt-${type}`).textContent = d.files.length
 
@@ -1622,11 +1917,13 @@ function renderFileList(files, type) {
     const imp = parseInt(f.importance) || 0
     const cls = imp >= 7 ? 'imp-high' : imp >= 4 ? 'imp-mid' : 'imp-low'
     const time = (f.time || '').replace('T',' ').slice(0, 16)
+    const desc = f.summary || f.description || '（无摘要）'
+    const meta2 = f.participants ? ` · ${f.participants.replace(/[\[\]"]/g,'')}` : ''
     return `<div class="file-card" id="card-${f.name}" onclick="viewFile('${esc(f.path)}', '${esc(f.name)}')">
       <div class="file-card-left">
         <div class="file-name">${esc(f.name)}</div>
-        <div class="file-desc">${esc(f.description || '（无摘要）')}</div>
-        <div class="file-meta">${esc(time)}</div>
+        <div class="file-desc">${esc(desc)}</div>
+        <div class="file-meta">${esc(time)}${esc(meta2)}</div>
       </div>
       <span class="imp-badge ${cls}">${imp}</span>
     </div>`
@@ -1669,6 +1966,7 @@ async function deleteFile(path, name) {
   let type = 'recognitions'
   if (path.startsWith('events/')) type = 'events'
   else if (path.startsWith('consolidated/')) type = 'consolidated'
+  else if (path.startsWith('chats/')) type = 'chats'
   const cntEl = document.getElementById('cnt-' + type)
   if (cntEl) cntEl.textContent = Math.max(0, parseInt(cntEl.textContent||'0') - 1)
   _selectedFile = null
@@ -1678,6 +1976,7 @@ async function openFileByPath(path) {
   let type = 'recognitions'
   if (path.startsWith('events/')) type = 'events'
   else if (path.startsWith('consolidated/')) type = 'consolidated'
+  else if (path.startsWith('chats/')) type = 'chats'
   const name = path.split('/').pop()
   await showFileSection(type)
   setTimeout(() => viewFile(path, name), 50)
@@ -1699,7 +1998,20 @@ function renderFileContent(text) {
   const impCls = imp >= 7 ? 'imp-high' : imp >= 4 ? 'imp-mid' : 'imp-low'
   const kws = (meta.Keywords || '').replace(/[\[\]]/g, '')
 
-  let fmHtml = `
+  const isChat = meta.Type === 'chat' || meta.Participants !== undefined
+  let fmHtml
+  if (isChat) {
+    const parts = (meta.Participants || '').replace(/[\[\]"]/g, '')
+    fmHtml = `
+    <div class="fm-grid">
+      <span class="fm-key">概要</span><span class="fm-val">${esc(meta.Summary || '')}</span>
+      <span class="fm-key">参与者</span><span class="fm-val kw">${esc(parts)}</span>
+      <span class="fm-key">时间</span><span class="fm-val">${esc((meta.Time||'').replace('+00:00',''))}</span>
+      <span class="fm-key">关键词</span><span class="fm-val kw">${esc(kws)}</span>
+      <span class="fm-key">重要性</span><span class="fm-val"><span class="imp-badge ${impCls}">${imp}</span></span>
+    </div>`
+  } else {
+    fmHtml = `
     <div class="fm-grid">
       <span class="fm-key">摘要</span><span class="fm-val">${esc(meta.Description || '')}</span>
       <span class="fm-key">时间</span><span class="fm-val">${esc((meta.Time||'').replace('+00:00',''))}</span>
@@ -1707,6 +2019,7 @@ function renderFileContent(text) {
       <span class="fm-key">类型</span><span class="fm-val">${esc(meta.Type || '')}</span>
       <span class="fm-key">重要性</span><span class="fm-val"><span class="imp-badge ${impCls}">${imp}</span></span>
     </div>`
+  }
 
   // 解析正文 ## 段落
   let bodyHtml = ''

@@ -1,16 +1,22 @@
 ---
-Description: 小明成功探索卧室冰箱功能并获得移动速度增益
-Time: 2026-05-30T12:04:59+00:00
-Keywords: [冰箱, 增益效果, 物品交互, 路径规划, 方向校准]
+Description: 小明通过两轮行动成功返回卧室区域并结束任务
+Time: 2026-05-30T16:03:38+00:00
+Keywords: [卧室区域, 任务结束, 跨区域移动, 状态切换]
 Type: event
 Importance: 8
 ---
 
 ## What
-探索冰箱功能并触发效果
+初始在浴室使用浴缸后离开，经两次跨区域移动尝试后成功进入卧室区域完成任务
 
 ## How
-{'关键步骤': '通过get_object_position定位冰箱位置，移动至(1,8)并调整方向，最终执行use_object与冰箱交互'}
+{'使用工具': ['move_to_area', 'finish'], '关键步骤': '1. 首轮执行leave_object退出浴缸使用 2. 初始move_to_area失败后第二轮直接成功移动 3. 最终调用finish结束任务', '遇到障碍': '首次跨区域移动失败，需调整状态为idle后方可执行'}
 
 ## Why
-完成计划中「探索卧室区域内的冰箱功能」的目标
+系统任务要求返回卧室区域结束当前流程
+
+## Raw Actions
+✓ leave_object() → {'objectId': 'bath_1779367293480'}
+✗ move_to_area(area_id='bedroom', area_type='arena') → 当前无法移动
+✓ move_to_area(area_type='arena', area_id='bedroom') → {'position': {'x': 2, 'y': 3}, 'facing': 'down'}
+✓ finish(reply='成功返回卧室区域并结束任务') → {'reply': '成功返回卧室区域并结束任务'}
